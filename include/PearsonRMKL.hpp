@@ -342,7 +342,7 @@ size_t batchSize = (size_t)_numVectors * (size_t)desiredBatch;
     exit(-1);
   }
 
-size_t dataSize = (_numVectors * _vectorSize); 
+size_t dataSize = (_numVectors * _vectorSizeAligned); 
  FloatType *countMat = (FloatType*) mm_malloc(
       (ssize_t) batchSize * sizeof(FloatType), 64);
   if (!countMat) {
