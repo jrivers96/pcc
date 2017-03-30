@@ -38,7 +38,7 @@ bool EXPMatrixReader<FloatType>::getMatrixSize(string& fileName, int& numVectors
 	char* buffer = NULL, *tok;
 	size_t bufferSize = 0;
 	int numChars;
-	const char delim[] = "\t";
+	const char delim[] = ",";
 	CustomFileReader fileReader;
 
 	/*open the file*/
@@ -60,7 +60,7 @@ bool EXPMatrixReader<FloatType>::getMatrixSize(string& fileName, int& numVectors
 	for (tok = strtok(buffer, delim); tok != NULL; tok = strtok(NULL, delim)) {
 		vectorSize++;
 	}
-	vectorSize -= 2; /*exclude the first columns of the header: prob id and locus id*/
+	vectorSize -= 1; /*exclude the first columns of the header: compound id*/
 	fprintf(stderr, "Number of samples: %d\n", vectorSize);
 
 	if(skip){
@@ -77,7 +77,7 @@ bool EXPMatrixReader<FloatType>::getMatrixSize(string& fileName, int& numVectors
 		}
 	}
 
-	/*get gene expression profiles*/
+	/*get entity id profiles*/
 	while ((numChars = fileReader.getline(&buffer, &bufferSize)) != -1) {
 		/*empty line*/
 		if (numChars == 0) {
@@ -85,7 +85,7 @@ bool EXPMatrixReader<FloatType>::getMatrixSize(string& fileName, int& numVectors
 		}
 		++numVectors;
 	}
-	fprintf(stderr, "Number of gene expression profiles: %d\n", numVectors);
+	fprintf(stderr, "Number of compound id profiles: %d\n", numVectors);
 
 	/*close the file*/
 	fileReader.close();
@@ -102,7 +102,7 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 	size_t bufferSize = 0;
 	int numChars, index;
 	bool firstEntry;
-	const char delim[] = "\t";
+	const char delim[] = ",";
 	CustomFileReader fileReader;
 
 	/*open the file*/
@@ -128,12 +128,13 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 		fileReader.close();
 		return false;
 	}
-	tok = strtok(NULL, delim);
+	/*tok = strtok(NULL, delim);
 	if(tok == NULL){
     fprintf(stderr, "Incomplete header at line %d\n", __LINE__);
     fileReader.close();
     return false;
 	}
+  */
 	/*save sample names*/
 	for (tok = strtok(NULL, delim); tok != NULL; tok = strtok(NULL, delim)) {
 		samples.push_back(string(tok));
@@ -173,7 +174,7 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 		/*consistency check*/
 		if (numGenes >= numVectors) {
 			fprintf(stderr,
-					"Eorror: number of genes (%d) is not equal to (%d)\n", numGenes, numVectors);
+					"Error: number of compound id (%d) is not equal to (%d)\n", numGenes, numVectors);
 			fileReader.close();
 			return false;
 		}
@@ -185,24 +186,24 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 			fileReader.close();
 			return false;
 		}
-		/*save the locus id*/
+		/*save the entity id*/
 		genes.push_back(string(tok));
-
-
+ 
+    /* riversj
 		tok = strtok(NULL, delim);
     if(tok == NULL){
       fprintf(stderr, "incomplete file at line %d\n", __LINE__);
       fileReader.close();
       return false;
     }
-
+    */
 		/*extract gene expression values*/
 		index = 0;
 		for (tok = strtok(NULL, delim); tok != NULL;
 				tok = strtok(NULL, delim)) {
 			if (index >= vectorSize) {
 				fprintf(stderr,
-						"Error: number of gene expression values is inconsistent with others\n");
+						"Error: number of entity id values is inconsistent with others\n");
 				fileReader.close();
 				return false;
 			}
@@ -219,7 +220,7 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 	}
 	if (numGenes != numVectors) {
 		fprintf(stderr,
-				"Eorror: number of genes (%d) is inconsistent with number of vectors (%d)\n", numGenes, numVectors);
+				"Error: number of entity ids (%d) is inconsistent with number of vectors (%d)\n", numGenes, numVectors);
 		fileReader.close();
 		return false;
 	}
