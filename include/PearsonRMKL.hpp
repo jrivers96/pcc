@@ -305,7 +305,7 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
   }
  */
 
- int desiredBatch = 1000;
+ int desiredBatch = 500;
  ssize_t numBatches = ceil((double)_numVectors / (double)desiredBatch);
  fprintf(stderr, "numVectors: %u \n", _numVectors);
  fprintf(stderr, "desiredBatch: %u \n", desiredBatch);
@@ -478,6 +478,7 @@ double ptime, pltime;
 ptime = getSysTime();
 ///create the squared matrix for the entire data set to be used in normalization
 vsPow(dataSize, (float *)_vectors, (float *)power, (float *) squared);
+mm_free(power);
 pltime = getSysTime();
 fprintf(stderr, "vdPow: %f seconds\n", pltime - ptime);
 
