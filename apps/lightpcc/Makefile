@@ -35,17 +35,17 @@ MKL_INC= -I $(MKL_ROOT)/include
 
 #compiler and options for non-MPI-based version
 CXX = icpc
-CXXFLAGS= -DHAVE_INTEL_ICC -O3 $(FAST) $(MKL_INC) -mkl -funroll-loops -Wall -I include $(macros) '-qoffload-option,mic,ld,-z defs -rpath /opt/intel/mic/myo/lib/ -rpath /opt/intel/mic/coi/device-linux-release/lib' -qopenmp -qoffload-attribute-target=mic $(VEC_REPORT) $(LIB_HEADER_INC)
+CXXFLAGS= -DHAVE_INTEL_ICC -O3 $(FAST) $(MKL_INC) -mkl -funroll-loops -Wall -I include $(macros) -qopenmp $(VEC_REPORT) $(LIB_HEADER_INC)
 LIBS = $(MKL_LIB) -lm -loffload	$(zlibs)
 
 #compiler and options for MPI-based version
 MPICXX = mpiicpc
-MPICXXFLAGS= -DHAVE_INTEL_ICC -O3 $(FAST) $(MKL_INC) -mkl -msse3 -funroll-loops -Wall -I include $(macros) '-qoffload-option,mic,ld,-z defs -rpath /opt/intel/mic/myo/lib/ -rpath /opt/intel/mic/coi/device-linux-release/lib' -qopenmp $(VEC_REPORT) $(LIB_HEADER_INC)
+MPICXXFLAGS= -DHAVE_INTEL_ICC -O3 $(FAST) $(MKL_INC) -mkl -msse3 -funroll-loops -Wall -I include $(macros) -qopenmp $(VEC_REPORT) $(LIB_HEADER_INC)
 MPILIBS= -lm -loffload $(zlibs)
 
 #LightPCC
-ppc_exec = LightPCC
-mpi_ppc_exec = mpiLightPCC
+ppc_exec = PCC
+mpi_ppc_exec = mpiPCC
 
 all: dir shared distributed
 
@@ -64,8 +64,8 @@ clean:
 	-rm -rf $(objs_dir) $(ppc_exec) $(mpi_ppc_exec)
 
 $(objs_dir)/%.cpp.o: $(src_dir)/%.cpp
-	$(CXX) $(CXXFLAGS) -DWITH_PHI -o $@ -c $<
+	$(CXX) $(CXXFLAGS) -o $@ -c $<
 
 $(objs_dir)/%.mpi.o: $(src_dir)/%.cpp
-	$(MPICXX) $(MPICXXFLAGS) -DWITH_MPI -DWITH_PHI -o $@ -c $<
+	$(MPICXX) $(MPICXXFLAGS) -DWITH_MPI -o $@ -c $<
 

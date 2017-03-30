@@ -305,7 +305,7 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
   }
  */
 
- int desiredBatch = 2096;
+ int desiredBatch = 1000;
  ssize_t numBatches = ceil((double)_numVectors / (double)desiredBatch);
  fprintf(stderr, "numVectors: %u \n", _numVectors);
  fprintf(stderr, "desiredBatch: %u \n", desiredBatch);
@@ -341,8 +341,8 @@ size_t batchSize = (size_t)_numVectors * (size_t)desiredBatch;
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+
 size_t dataSize = (_numVectors * _vectorSize); 
- 
  FloatType *countMat = (FloatType*) mm_malloc(
       (ssize_t) batchSize * sizeof(FloatType), 64);
   if (!countMat) {
