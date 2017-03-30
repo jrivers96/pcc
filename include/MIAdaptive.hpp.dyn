@@ -1,0 +1,1597 @@
+/*
+ * MIAdaptive.hpp
+ *
+ *  Created on: June 17, 2016
+ *  Author: Liu, Yongchao
+ *  Affiliation: School of Computational Science & Engineering
+ *  						Georgia Institute of Technology, Atlanta, GA 30332
+ *  URL: www.liuyc.org
+ */
+
+#ifndef MPI_ADAPTIVE_HPP_
+#define MPI_ADAPTIVE_HPP_
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <vector>
+#include <omp.h>
+#include <typeinfo>
+using namespace std;
+#pragma once
+
+#include <DeviceUtils.hpp>
+
+#ifdef WITH_MPI
+#include <mpi.h>
+#endif	/*with mpi*/
+
+#ifdef WITH_PHI
+#include <immintrin.h>
+/*for device memroy allocation*/
+#define MI_ADAPTIVE_MIC_REUSE alloc_if(0) free_if(0)
+#define MI_ADAPTIVE_MIC_ALLOC alloc_if(1) free_if(0)
+#define MI_ADAPTIVE_MIC_FREE  length(0) alloc_if(0) free_if(1)
+#define MI_ADAPTIVE_MIC_ALLOC_FREE alloc_if(1) free_if(1)
+#endif	/*with phi*/
+
+/*tile size*/
+#define MI_ADAPTIVE_PHI_TILE_DIM	4
+#define MI_ADAPTIVE_PHI_TILE_SIZE	(MI_ADAPTIVE_PHI_TILE_DIM * MI_ADAPTIVE_PHI_TILE_DIM)
+#define MI_ADAPTIVE_TILE_DIM		8
+#define MI_ADAPTIVE_MPI_TILE_DIM	8
+#define MI_ADAPTIVE_MPI_TILE_SIZE (MI_ADAPTIVE_MPI_TILE_DIM * MI_ADAPTIVE_MPI_TILE_DIM)
+
+/*maximum dimension size*/
+#ifndef MI_ADAPTIVE_MAX_MAT_DIM
+#define MI_ADAPTIVE_MAX_MAT_DIM			(1<<25)
+#endif
+
+/*maximum Xeon Phi buffer size*/
+#define MI_ADAPTIVE_PHI_BUFFER_SIZE (1 << 29)
+
+/*define the root process when using master-slave model*/
+#define MI_ADAPTIVE_ROOT 0
+
+/*software barrier for hardware threads per core*/
+//#define SOFT_BARRIER	1	
+
+/*template class*/
+template<typename FloatType, typename RankType = unsigned short>
+class MIAdaptive {
+public:
+	MIAdaptive(int numVectors, int vectorSize, int numCPUThreads,
+			int numMICThreads, int micIndex, int rank, int numProcs);
+	~MIAdaptive();
+
+	inline FloatType* getVectors() {
+		return _vectors;
+	}
+	inline int getNumVectors() {
+		return _numVectors;
+	}
+	inline int getVectorSize() {
+		return _vectorSize;
+	}
+	inline int getVectorSizeAligned() {
+		return _vectorSizeAligned;
+	}
+
+	/*generate random data*/
+	void generateRandomData(const int seed = 11);
+
+	/*single threaded implementation*/
+	void runSingleThreaded();
+
+	/*multiple threads with optimized*/
+	void runMultiThreaded();
+
+#ifdef WITH_PHI
+	/*exon phi*/
+	void runSingleXeonPhi();
+#endif	/*with phi*/
+
+	/*MPI*/
+#ifdef WITH_MPI
+	void runMPICPU();
+#ifdef WITH_PHI
+	void runMPIXeonPhi();
+#endif	/*with phi*/
+#endif	/*with mpi*/
+
+protected:
+	FloatType* _vectors; /*vector data. Stored consecutively and each vector contains an aligned number of elements*/
+	int _numVectors; /*number of vectors in the data*/
+	int _vectorSize; /*effective vector size, i.e. the real number of elements per vector*/
+	int _vectorSizeAligned; /*aligned to vector size to 16 so that the address is aligned to 64 byte boundary*/
+	//int _maxPartitionSize; /*maximum partition size for asynchronous mode*/
+	int _numCPUThreads; /*the number of CPU threads*/
+	int _numMICThreads; /*the number of MIC threads*/
+	int _micIndex;	/*index of MIC used by this processs*/
+	int _rank;			/*process rank*/
+	int _numProcs;	/*number of MPI processes*/
+	int _useShrdCounter;	/*use shared counter*/
+	ssize_t MI_ADAPTIVE_MPI_PHI_BUFFER_SIZE;
+	FloatType* _mutualInfoCorr; /*pearson correlation matrix*/
+	ssize_t* _mutualInfoTileIndex;	/*the corresponding tile index and only used for distributed computing*/
+
+	/*used for software barrier*/
+	int* _barriers;
+	int* _counts;
+
+	/*for Xeon Phi*/
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	void _softBarrierInit(const int numSlots, const int numThreads)
+	{
+		_barriers = (int*)mm_malloc(numSlots * sizeof(int), 64);
+		_counts = (int*)mm_malloc(numSlots * sizeof(int), 64);
+		for(int i = 0; i < numSlots; ++i){
+			_counts[i] = numThreads;
+			_barriers[i] = 0;
+		}
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _softBarrierFinalize()
+	{
+		mm_free(_barriers);
+		mm_free(_counts);
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _softBarrierSync(const int barrierIndex, const int numThreads, int& localSense)
+	{
+		localSense = !localSense;	/*inverse local variable*/
+		if(__sync_fetch_and_sub(_counts + barrierIndex, 1) == 1){
+			__sync_fetch_and_add(_counts + barrierIndex, numThreads);
+			__sync_bool_compare_and_swap(_barriers + barrierIndex, !localSense, localSense);
+			//_barriers[barrierIndex] = localSense;
+			//_counts[barrierIndex] = numThreads;
+		}else{
+			//while(_barriers[barrierIndex] != localSense);
+			while(__sync_fetch_and_sub(_barriers + barrierIndex, 0) != localSense);
+		}
+	}
+
+	/*compute pairwise mutual information using adaptive partitioning estimator*/
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+		FloatType _computeMIAdaptive(FloatType* __restrict__ vecX, FloatType* __restrict__ vecY,
+				RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices, RankType* __restrict__ rowPtrX,
+				Window<RankType>* __restrict__ partitions, const int maxNumPartitions);
+
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _createSparseMatrix(FloatType* __restrict__ vecX, FloatType* __restrict__ vecY,
+    	RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices, RankType* __restrict__ rowPtrX);
+
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	int _getNumPointsInWindow(RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices, RankType* __restrict__ rowPtrX, Window<RankType>& window);
+
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _runSingleXeonPhiCore(
+			FloatType* __restrict__ vectors, FloatType* __restrict__ prValues, const ssize_t indexRangeStart, const ssize_t indexRangeClose);
+
+	/*static function members*/
+public:
+	/*when matrix dimension size is large than 2^21, we should use long double instead of double*/
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	inline void getCoordinate(const ssize_t globalIndex,
+			const ssize_t matrixDimSize, int& row, int& col) {
+#if MI_ADAPTIVE_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+		mydouble p, q;
+		p = static_cast<mydouble>(matrixDimSize - 1);
+		q = static_cast<mydouble>(globalIndex);
+		row = (int) ceil(p - 0.5 - sqrt(p * p + p - 2 * (q + 1) + 0.25));
+		col = row
+				+ (globalIndex - (2 * (matrixDimSize - 1) - row + 1) * row / 2)
+				+ 1;
+	}
+
+	/*conditions: row < col*/
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	inline ssize_t getGlobalIndex(const ssize_t matrixDimSize, const int row,
+			const int col) {
+#if MI_ADAPTIVE_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+
+		mydouble p, q;
+		p = static_cast<mydouble>(matrixDimSize);
+
+		return (ssize_t) ((p - 1 - 0.5 * (row - 1)) * row + col - (row + 1));
+	}
+
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	inline void getTileCoordinate(const ssize_t globalIndex,
+			const ssize_t tileDim, int& row, int& col) {
+#if MI_ADAPTIVE_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+		mydouble p, q;
+		p = static_cast<mydouble>(tileDim);
+		q = static_cast<mydouble>(globalIndex);
+		row = (int) ceil(p - 0.5 - sqrt(p * p + p - 2 * (q + 1) + 0.25));
+		col = row + (globalIndex - (2 * tileDim - row + 1) * row / 2);
+	}
+
+	/*conditions: row <= col*/
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	inline ssize_t getTileGlobalIndex(const ssize_t matrixDimSize, const int row,
+		const int col) {
+#if MI_ADAPTIVE_MAX_MAT_DIM < (1 << 25)
+    typedef double mydouble;
+#else
+    typedef long double mydouble;
+#endif
+
+    mydouble p, q;
+    p = static_cast<mydouble>(matrixDimSize);
+
+    return (ssize_t) ((p - 0.5 * (row - 1)) * row + col - row);
+	}
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline double getSysTime() {
+		double dtime;
+		struct timeval tv;
+
+		gettimeofday(&tv, NULL);
+
+		dtime = (double) tv.tv_sec;
+		dtime += (double) (tv.tv_usec) / 1000000.0;
+
+		return dtime;
+	}
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline void* mm_malloc(ssize_t size, ssize_t alignment)
+	{
+		return _mm_malloc(size, alignment);
+	}
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline void mm_free(void* buffer)
+	{
+		_mm_free(buffer);
+	}
+
+};
+
+template<typename FloatType, typename RankType>
+MIAdaptive<FloatType, RankType>::MIAdaptive(int numVectors, int vectorSize, int numCPUThreads,
+		int numMICThreads, int micIndex, int rank, int numProcs) {
+	int alignment = 64 / sizeof(FloatType);	/*align to 64 byte boundary*/
+	_numVectors = numVectors;
+	_vectorSize = vectorSize;
+	_vectorSizeAligned = (_vectorSize + alignment - 1) / alignment * alignment;
+	_numCPUThreads = numCPUThreads;
+	_numMICThreads = numMICThreads;
+	_micIndex = micIndex; /*index of mic device*/
+	_rank = rank;
+	_numProcs = numProcs;
+	_useShrdCounter = 1;
+	if(_useShrdCounter){
+		MI_ADAPTIVE_MPI_PHI_BUFFER_SIZE = 1 << 22;
+	}else{
+		MI_ADAPTIVE_MPI_PHI_BUFFER_SIZE = 1 << 29;
+	}
+
+	/*check the number of vectors*/
+	if (_numVectors > MI_ADAPTIVE_MAX_MAT_DIM) {
+		fprintf(stderr,
+				"The number of vectors exceeds the maximum limit (%ld)\n",
+				(ssize_t) MI_ADAPTIVE_MAX_MAT_DIM);
+		exit(-1);
+	}
+
+	/*allocate space*/
+	_mutualInfoCorr = NULL;
+	_mutualInfoTileIndex = NULL;
+
+	/*align each vector*/
+	_vectors = (FloatType*) mm_malloc(
+			(ssize_t)_numVectors * _vectorSizeAligned * sizeof(FloatType), 64);
+	if (!_vectors) {
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+		__LINE__, __FILE__);
+		exit(-1);
+	}
+}
+
+template<typename FloatType, typename RankType>
+MIAdaptive<FloatType, RankType>::~MIAdaptive() {
+	if (_vectors) {
+		mm_free(_vectors);
+	}
+	if (_mutualInfoCorr) {
+		mm_free(_mutualInfoCorr);
+	}
+	if(_mutualInfoTileIndex){
+		mm_free(_mutualInfoTileIndex);
+	}
+}
+
+/*compute pairwise mutual information using adaptive partitioning estimator*/
+template<typename FloatType, typename RankType>
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+void MIAdaptive<FloatType, RankType>::_createSparseMatrix(FloatType* __restrict__ vecX, FloatType* __restrict__ vecY,
+		RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices, RankType* __restrict__ rowPtrX)
+{
+	RankType x, y, off;
+	RankType sumX, sumY, tmp;
+
+	/*build a histogram and perform prefix sum for Y*/
+	memset(rowPtrY, 0, (_vectorSize + 1) * sizeof(RankType));
+	for(int i = 0; i < _vectorSize; ++i){
+		/*get the y coordinate*/
+		y = vecY[i];
+
+		/*count the number of identical y coordinates*/
+		rowPtrY[y]++;
+	}
+
+	/*CSR sparse matrix*/
+	sumY = rowPtrY[0];
+	rowPtrY[0] = 0;
+	for(int i = 1; i < _vectorSize; ++i){
+		tmp = rowPtrY[i];
+		rowPtrY[i] = sumY;
+		sumY += tmp;
+	}
+	rowPtrY[_vectorSize] = sumY;
+
+	memset(rowPtrX, 0, (_vectorSize + 1) * sizeof(RankType));
+	for(int i = 0; i < _vectorSize; ++i){
+		/*get the y coordinate*/
+		y = vecY[i];
+
+		/*get the global offset of x*/
+		off = rowPtrY[y] + rowPtrX[y];
+
+		/*increase the local offset of x*/
+		rowPtrX[y]++;
+
+		/*get and save the x coordinate*/
+		colIndices[off] = vecX[i];
+	}
+
+	/*build a histrogram and compute prefix sum for X*/
+	memset(rowPtrX, 0, (_vectorSize + 1) * sizeof(RankType));
+	for(int i = 0; i < _vectorSize; ++i){
+		/*get the x coordinate*/
+		x = vecX[i];
+
+		/*count the number of x coordinate*/
+		rowPtrX[x]++;
+	}
+
+	sumX = rowPtrX[0];
+	rowPtrX[0] = 0;
+	for(int i = 1; i < _vectorSize; ++i){
+		tmp = rowPtrX[i];
+		rowPtrX[i] = sumX;
+		sumX += tmp;
+	}
+	rowPtrX[_vectorSize] = sumX;
+}
+
+template<typename FloatType, typename RankType>
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+int MIAdaptive<FloatType, RankType>::_getNumPointsInWindow(RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices,
+			 RankType* __restrict__ rowPtrX, Window<RankType>& window)
+{
+	int beg, end, n = 0;
+	int nx, ny;
+
+	/*check if the window is valid*/
+	if(window.isInvalid()){
+		return 0;
+	}
+
+	nx = rowPtrX[window._x2 + 1] - rowPtrX[window._x1];
+	ny = rowPtrY[window._y2 + 1] - rowPtrY[window._y1];
+	if(nx == 0 || ny == 0){
+		return 0;
+	}
+
+	/*check the sparse matrix*/
+	beg = rowPtrY[window._y1];
+	end = beg + ny;
+	for(int i = beg; i < end; i++){
+		int x = colIndices[i];
+		if(x >= window._x1 && x <= window._x2){
+			n++;
+		}
+	}
+
+	return n;
+}
+
+template<typename FloatType, typename RankType>
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+FloatType MIAdaptive<FloatType, RankType>::_computeMIAdaptive(FloatType* __restrict__ vecX, FloatType* __restrict__ vecY,
+			RankType* __restrict__ rowPtrY, RankType* __restrict__ colIndices, RankType* __restrict__ rowPtrX,
+			Window<RankType>* __restrict__ partitions, const int maxNumPartitions)
+{
+	int midX, midY, n;
+	FloatType probX, probY, probXY;
+	Window<RankType> windows[4];
+	const FloatType factor = 1.0 / (FloatType)_vectorSize;
+
+	/*create sparse matrix*/
+	_createSparseMatrix(vecX, vecY, rowPtrY, colIndices, rowPtrX);
+
+	/*adaptive partitioning estimator*/
+	int firstIter = 0;
+	int lastIter = 0;	/*empty partition list*/
+	int numValids, npts;
+
+	/*Since there is no overlap between subwindows, we will have at most _vectorSize subwindows a total.
+ 	Hence, a buffer of _vectorSize + 1 elements should be enough for the buffer*/
+	/*push one partition from the back*/
+	partitions[lastIter] = Window<RankType>(0, 0, _vectorSize - 1, _vectorSize - 1, _vectorSize);
+	lastIter = (lastIter + 1) % maxNumPartitions;
+
+	/*enter the core loop*/
+	FloatType mi = 0;
+	while(lastIter != firstIter){
+		/*get the window*/
+		Window<RankType>& window = partitions[firstIter];
+		//printf("x1: %d y1: %d x2: %d y2: %d npts: %d\n", window._x1, window._y1, window._x2, window._y2, window._npts);
+
+		/*split the window*/
+		midX = (window._x1 + window._x2) / 2;
+		midY = (window._y1 + window._y2) / 2;
+
+		/*boundary points are counted in for each subwindow*/
+		windows[0].set(window._x1, window._y1, midX, midY);
+		windows[1].set(midX + 1, window._y1, window._x2, midY);
+		windows[2].set(window._x1, midY + 1, midX, window._y2);
+		windows[3].set(midX + 1, midY + 1, window._x2, window._y2);
+
+		/*get the number of points in each window*/
+		n = 0;
+		numValids = 0;
+		for(int i = 0; i < 4; ++i){
+			/*check how many points in the window*/
+			npts = _getNumPointsInWindow(rowPtrY, colIndices, rowPtrX, windows[i]);
+			/*set the number of points*/
+			windows[i]._npts = npts;
+
+			/*count the number of valid windows. This is used to avoid the cases
+ 				that many samples have the same rank in their respective vector*/
+			numValids += windows[i].isInvalid()? 0 : 1;
+
+			/*count the total number of points in the four sub-windows*/
+			n += npts;
+		}
+		if(n != window._npts){
+			printf("Error: the window splitting has some bug (%d != %d)\n", n, window._npts);
+			return 0;
+		}
+		//window.print();
+		//printf("%d %d %d %d\n", windows[0]._npts, windows[1]._npts, windows[2]._npts, windows[3]._npts);
+
+		/*compute chi-square test*/
+		FloatType e = (FloatType)n / 4;
+		FloatType chiSquare = 0, d;
+		for(int i = 0; i < 4; ++i){
+			d = windows[i]._npts - e;
+			chiSquare += d * d;
+		}
+		chiSquare /= e;
+
+		/*test the significance at P-value = 0.05 (freedom degree 3). If there is only sub-window is valid,
+ 		it means that this window cannot be further split any more but contains > 4 points*/
+		if(chiSquare < 7.815 || numValids == 1){
+			/*already uniform within this window*/
+			probX = factor * (rowPtrX[window._x2 + 1] - rowPtrX[window._x1]);
+			probY = factor * (rowPtrY[window._y2 + 1] - rowPtrY[window._y1]);
+			probXY = factor * n;
+
+			/*sum up this window*/
+			mi += probXY * log(probXY / probX / probY);
+
+			/*pop out the current*/
+			firstIter = (firstIter + 1) % maxNumPartitions;
+		}else{
+
+			/*pop out the current*/
+			firstIter = (firstIter + 1) % maxNumPartitions;
+
+			/*if the number of points in a window is < 4, already uniform as per chi-square test no matter how they are distributed*/
+			for(int i = 0; i < 4; ++i){
+				/*empty windows and windows of size 1 (i.e. single overlapped points) are excluded*/
+				if(windows[i]._npts == 0){
+					continue;
+				}
+				if(windows[i]._npts < 4){
+					/*compute the mutual information.*/
+					probX = factor * (rowPtrX[windows[i]._x2 + 1] - rowPtrX[windows[i]._x1]);
+					probY = factor * (rowPtrY[windows[i]._y2 + 1] - rowPtrY[windows[i]._y1]);
+					probXY = factor * windows[i]._npts;
+
+					/*sum up this window*/
+					mi += probXY * log(probXY / probX / probY);
+				}else{
+					/*push one partition from back*/
+					partitions[lastIter] = windows[i];
+					lastIter = (lastIter + 1) % maxNumPartitions;
+
+					/*check if the buffer is full*/
+					if(lastIter == firstIter){
+						printf("Error: the window queue is impossible to be full\n");
+						return 0;
+					}
+				}
+			}
+		}
+	}
+
+	return mi;
+}
+
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::generateRandomData(const int seed) {
+	srand48(11);
+	for (int i = 0; i < _numVectors; ++i) {
+		FloatType* __restrict__ dst = _vectors + i * _vectorSizeAligned;
+		for (int j = 0; j < _vectorSize; ++j) {
+			dst[j] = drand48();
+		}
+	}
+}
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::runSingleThreaded() {
+	double stime, etime;
+#ifdef VERBOSE
+	fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*output matrix*/
+	_mutualInfoCorr = (FloatType*) mm_malloc(
+			(ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
+	if (!_mutualInfoCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+
+	/*record the system time*/
+	stime = getSysTime();
+
+	double t1 = getSysTime();
+	int rank, j;
+	FloatType* __restrict__ vecX;
+	FloatType* __restrict__ vecY;
+	const FloatType avg = 1.0 / (FloatType)_vectorSize;
+
+	/*rank-transform based on homoemorphism property: Kraskov et al (2004) Estimating mutual informaiont. Physical review E 69, 066138*/
+	vecX = _vectors;
+	CustomPair<FloatType, int>* ranks = (CustomPair<FloatType, int>*)mm_malloc(_vectorSize * sizeof(CustomPair<FloatType, int>), 64);
+	for (int i = 0; i < _numVectors; ++i, vecX += _vectorSizeAligned) {
+
+		/*get the rank vector*/
+		for(j = 0; j < _vectorSize; ++j){
+			ranks[j]._first = vecX[j];
+			ranks[j]._second = j;
+		}
+		qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, int>), CustomPair<FloatType, int>::ascendFirst);
+		/*ranks start from zero*/
+		for(j = 0, rank = 0; j < _vectorSize - 1; ++j){
+			vecX[ranks[j]._second] = rank;
+			if(ranks[j]._first != ranks[j + 1]._first){
+				rank++;
+			}
+		}
+		vecX[ranks[j]._second] = rank;
+	}
+	mm_free(ranks);
+
+	double t2 = getSysTime();
+	if(_rank == 0) fprintf(stderr, "time for rank-transformation: %f seconds\n", t2 - t1);
+
+	/*compute pairwise mutual information*/
+	vecX = _vectors;
+	const int partitionSize =  _vectorSize + 1;
+	RankType* rowPtrX = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+	RankType* rowPtrY = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+	RankType* colIndices = (RankType*)mm_malloc(_vectorSize * sizeof(RankType), 64);
+	Window<RankType>* partitions = (Window<RankType>*)mm_malloc(partitionSize * sizeof(Window<RankType>), 64);
+	for (int row = 0; row < _numVectors; ++row, vecX += _vectorSizeAligned) {
+		vecY = _vectors + row * _vectorSizeAligned;
+		for (int col = row; col < _numVectors; ++col, vecY +=
+				_vectorSizeAligned) {
+
+			/*compute the mutual information*/
+			FloatType corr = _computeMIAdaptive(vecX, vecY, rowPtrY, colIndices, rowPtrX, partitions, partitionSize);
+			_mutualInfoCorr[(ssize_t)row * _numVectors + col] = corr;
+			_mutualInfoCorr[(ssize_t)col * _numVectors + row] = corr;
+		}
+	}
+	mm_free(rowPtrX);
+	mm_free(rowPtrY);
+	mm_free(colIndices);
+	mm_free(partitions);
+
+	/*recored the system time*/
+	etime = getSysTime();
+	fprintf(stderr, "Overall time: %f seconds\n",
+			etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _mutualInfoCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+}
+
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::runMultiThreaded() {
+	double stime, etime;
+	const int tileDim = (_numVectors + MI_ADAPTIVE_TILE_DIM - 1) / MI_ADAPTIVE_TILE_DIM;
+	const ssize_t numTiles = (ssize_t) (tileDim + 1) * tileDim / 2;
+	ssize_t totalNumPairs = 0;
+	const FloatType avg = 1.0 / (FloatType)_vectorSize;
+
+#ifdef VERBOSE
+  fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*record system time*/
+	stime = getSysTime();
+
+	/*allocate space*/
+	_mutualInfoCorr = (FloatType*) mm_malloc(
+			(ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
+	if (!_mutualInfoCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+
+	/*enter the core computation*/
+	if (_numCPUThreads < 1) {
+		_numCPUThreads = omp_get_num_procs();
+	}
+	omp_set_num_threads(_numCPUThreads);
+
+	/*entering the core loop*/
+#pragma omp parallel reduction(+:totalNumPairs)
+	{
+		ssize_t chunkSize;
+		int row, col, rank, j;
+		int loRowRange, hiRowRange;
+		int loColRange, hiColRange;
+		int tileRow, tileCol;
+		int startColPerRow, endColPerRow;
+		int rowStart, rowEnd, colStart, colEnd;
+		ssize_t numPairsProcessed = 0;
+		FloatType meanX, varX, x, prod;
+		FloatType* __restrict__ vecX;
+		FloatType* __restrict__ vecY;
+		const int tid = omp_get_thread_num();
+		const int nthreads = omp_get_num_threads();
+		typedef CustomPair<FloatType, int> MyPair;
+		const int partitionSize = _vectorSize + 1;
+		MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+		RankType* rowPtrX = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+		RankType* rowPtrY = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+		RankType* colIndices = (RankType*)mm_malloc(_vectorSize * sizeof(RankType), 64);
+		Window<RankType>* partitions = (Window<RankType>*)mm_malloc(partitionSize * sizeof(Window<RankType>), 64);
+
+		/*rank-transform and use static distribution*/
+		chunkSize = (_numVectors + nthreads - 1) / nthreads;
+		loRowRange = tid * chunkSize;
+		hiRowRange = min(_numVectors, (tid + 1) * (int) chunkSize) - 1;
+
+		vecX = _vectors + loRowRange * _vectorSizeAligned;
+		for (row = loRowRange; row <= hiRowRange; ++row, vecX +=
+				_vectorSizeAligned) {
+
+    	/*get the rank vector*/
+    	for(j = 0; j < _vectorSize; ++j){
+      	ranks[j]._first = vecX[j];
+      	ranks[j]._second = j;
+    	}
+    	qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, int>), CustomPair<FloatType, int>::ascendFirst);
+			/*ranks start from zero*/
+	    for(j = 0, rank = 0; j < _vectorSize - 1; ++j){
+     		vecX[ranks[j]._second] = rank;
+    	  if(ranks[j]._first != ranks[j + 1]._first){
+        	rank++;
+  	   	}
+ 	   	}
+			vecX[ranks[j]._second] = rank;
+		}
+		/*synchronize all threads*/
+#pragma omp barrier
+
+		/*dynamic distribution of tiles over threads*/
+#pragma omp for schedule(dynamic, 1)
+		for(ssize_t tile = 0; tile < numTiles; ++tile){
+			/*get the tile row and column*/
+			getTileCoordinate(tile, tileDim, tileRow, tileCol);
+
+			rowStart = tileRow * MI_ADAPTIVE_TILE_DIM;
+			rowEnd = min(_numVectors, rowStart + MI_ADAPTIVE_TILE_DIM);
+
+			colStart = tileCol * MI_ADAPTIVE_TILE_DIM;
+			colEnd = min(_numVectors, colStart + MI_ADAPTIVE_TILE_DIM);
+
+			/*compute the tile*/
+			vecX = _vectors + rowStart * _vectorSizeAligned;
+			for (row = rowStart; row < rowEnd; ++row, vecX +=
+					_vectorSizeAligned) {
+
+				/*column*/
+				vecY = _vectors + colStart * _vectorSizeAligned;
+				for (col = colStart; col < colEnd; ++col, vecY +=
+						_vectorSizeAligned) {
+
+					/*compute pariwise mututaion information*/
+					if(row <= col){
+						++numPairsProcessed;	/*statistics*/
+						FloatType corr =  _computeMIAdaptive(vecX, vecY, rowPtrY, rowPtrX, colIndices, partitions, partitionSize);
+						_mutualInfoCorr[(ssize_t)row * _numVectors + col] = corr;
+						_mutualInfoCorr[(ssize_t)col * _numVectors + row] = corr;
+					}
+				}
+			}
+		}
+		mm_free(ranks);
+		mm_free(rowPtrX);
+		mm_free(rowPtrY);
+		mm_free(colIndices);
+		mm_free(partitions);
+
+		/*reduction*/
+		totalNumPairs += numPairsProcessed;
+	} /*#pragma omp paralle*/
+	
+	/*recored the system time*/
+	etime = getSysTime();
+	fprintf(stderr, "Overall time (%ld pairs): %f seconds\n", totalNumPairs,
+			etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _mutualInfoCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+
+}
+
+#ifdef WITH_PHI
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::runSingleXeonPhi() {
+	const int tileDim = (_numVectors + MI_ADAPTIVE_PHI_TILE_DIM - 1) / MI_ADAPTIVE_PHI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	ssize_t indexRangeStart, indexRangeClose;
+	ssize_t indexRangeStartPrev, indexRangeClosePrev;
+	double stime, etime;
+	FloatType* prValues[2];
+
+#ifdef VERBOSE
+  fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*set the number of threads on Xeon Phi*/
+#pragma offload target(mic:_micIndex) inout(_numMICThreads)
+	{
+		/*set the number of threads*/
+		if (_numMICThreads < MI_ADAPTIVE_PHI_TILE_DIM) {
+			_numMICThreads = omp_get_num_procs();
+		}
+		_numMICThreads = _numMICThreads / MI_ADAPTIVE_PHI_TILE_DIM * MI_ADAPTIVE_PHI_TILE_DIM;
+		omp_set_num_threads (_numMICThreads);
+	}
+	fprintf(stderr, "number of threads: %d\n", _numMICThreads);
+
+	/*allocate intermediate memory*/
+	ssize_t maxPrValuesSize = MI_ADAPTIVE_PHI_BUFFER_SIZE / sizeof(FloatType); /*a total of 512 MB*/
+	ssize_t alignment = _numMICThreads * MI_ADAPTIVE_PHI_TILE_SIZE;
+	maxPrValuesSize = (maxPrValuesSize + alignment - 1) / alignment * alignment;
+	for (int i = 0; i < 2; ++i) {
+		prValues[i] = (FloatType*) mm_malloc(
+				maxPrValuesSize * sizeof(FloatType), 64);
+		if (!prValues[i]) {
+			fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+					__LINE__, __FILE__);
+			exit(-1);
+		}
+	}
+
+	/*align to the tile size*/
+	_mutualInfoCorr = (FloatType*)mm_malloc((ssize_t)_numVectors * _numVectors * sizeof(FloatType), 64);
+	if(!_mutualInfoCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+
+	/*set the variables*/
+  int signalVar, tileRowStart, tileRowEnd;
+  int tileColStart, tileColEnd;
+  ssize_t tileOffset, numElems, maxNumTilesPerPass;
+  FloatType value;
+	FloatType* __restrict__ inValues = prValues[0];	/*virtual memory address only on the host*/
+	FloatType* __restrict__ outValues = prValues[1];
+	FloatType* __restrict__ vectors = _vectors;
+	FloatType* __restrict__ hostPrValues = prValues[0];	/*this virtual memory will be phisically allocated on the host*/
+
+	fprintf(stderr, "Start transfering data\n");
+#pragma offload_transfer target(mic: _micIndex) \
+		in(vectors: length(_numVectors * _vectorSizeAligned) MI_ADAPTIVE_MIC_ALLOC) \
+		nocopy(inValues: length(maxPrValuesSize) MI_ADAPTIVE_MIC_ALLOC) \
+		nocopy(outValues: length(maxPrValuesSize) MI_ADAPTIVE_MIC_ALLOC)
+
+	fprintf(stderr, "Start computing\n");
+	/*record system time*/
+	stime = getSysTime();
+
+	/*compute mean and variance*/
+	double t1 = getSysTime();
+#pragma offload target(mic:_micIndex) nocopy(vectors: MI_ADAPTIVE_MIC_REUSE)
+	{
+#pragma omp parallel
+		{
+			int row, col, rank, j;
+			int chunkSize, loRowRange, hiRowRange;
+			FloatType x, y, r, meanX, varX;
+			FloatType* __restrict__ vecX;
+			const int tid = omp_get_thread_num();
+			const int nthreads = omp_get_num_threads();
+			const FloatType avg = 1.0 / (FloatType)_vectorSize;
+			typedef CustomPair<FloatType, int> MyPair;
+			MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+			/*rank transform*/
+			chunkSize = (_numVectors + nthreads - 1) / nthreads;
+			loRowRange = tid * chunkSize;
+			hiRowRange = min(_numVectors, (tid + 1) * chunkSize);
+
+			vecX = vectors + loRowRange * _vectorSizeAligned;
+			for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+					_vectorSizeAligned) {
+
+    		/*get the rank vector*/
+      	for(j = 0; j < _vectorSize; ++j){
+      	  ranks[j]._first = vecX[j];
+        	ranks[j]._second = j;
+      	}
+      	qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, int>), CustomPair<FloatType, int>::ascendFirst);
+				/*ranks start from zero*/
+	    	for(j = 0, rank = 0; j < _vectorSize - 1; ++j){
+      		vecX[ranks[j]._second] = rank;
+      		if(ranks[j]._first != ranks[j + 1]._first){
+        		rank++;
+      		}
+   		 	}
+				vecX[ranks[j]._second] = rank;
+			}
+			mm_free(ranks);
+		}
+	}
+	double t2 = getSysTime();
+	fprintf(stderr, "time for rank-transformation: %f seconds\n", t2 - t1);
+
+	/*the first round*/
+	t1 = getSysTime();
+	maxNumTilesPerPass = maxPrValuesSize / MI_ADAPTIVE_PHI_TILE_SIZE;
+	indexRangeStart = 0;
+	indexRangeClose = min(numTiles, maxNumTilesPerPass);
+#pragma offload target(mic:_micIndex) \
+		nocopy(vectors: MI_ADAPTIVE_MIC_REUSE)	\
+		nocopy(inValues: MI_ADAPTIVE_MIC_REUSE)	\
+		in(indexRangeStart) \
+		in(indexRangeClose) \
+		signal(&signalVar)
+	{
+		/*compute*/
+		_runSingleXeonPhiCore(vectors, inValues, indexRangeStart,
+				indexRangeClose);
+	}
+	/*enter the core loop*/
+	int round = 1;
+	while (1) {
+		/*wait the completion of the previous computation and swap the buffers*/
+#pragma offload target(mic:_micIndex) \
+    nocopy(inValues: MI_ADAPTIVE_MIC_REUSE) \
+    nocopy(outValues: MI_ADAPTIVE_MIC_REUSE) \
+    wait(&signalVar)
+		{
+				swap(inValues, outValues);
+		}
+		swap(inValues, outValues);
+
+		/*save the finished round*/
+		fprintf(stderr, "Round %d: %ld %ld\n", round++, indexRangeStart, indexRangeClose);
+		indexRangeStartPrev = indexRangeStart;
+		indexRangeClosePrev = indexRangeClose;
+		if (indexRangeClose >= numTiles) {
+			/*already finished the computation*/
+			break;
+		}
+
+		/*compute the next range*/
+		indexRangeStart += maxNumTilesPerPass;
+		indexRangeClose = min(numTiles, maxNumTilesPerPass + indexRangeStart);
+#pragma offload target(mic:_micIndex) \
+		nocopy(vectors : MI_ADAPTIVE_MIC_REUSE)	\
+		nocopy(inValues: MI_ADAPTIVE_MIC_REUSE)	\
+		in(indexRangeStart)	\
+		in(indexRangeClose)	\
+		signal(&signalVar)
+		{
+			_runSingleXeonPhiCore(vectors, inValues, indexRangeStart,
+					indexRangeClose);
+		}
+
+		/*device-to-host data transfer and save*/
+		numElems = (indexRangeClosePrev - indexRangeStartPrev) * MI_ADAPTIVE_PHI_TILE_SIZE;
+		if(numElems > maxPrValuesSize){
+			fprintf(stderr, "Error: %ld > %ld\n", numElems, maxPrValuesSize);
+		}
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(hostPrValues[0:numElems]) MI_ADAPTIVE_MIC_REUSE)
+
+    /*save the data to the correlation matrix*/
+		tileOffset = 0;
+    for(ssize_t idx = indexRangeStartPrev; idx < indexRangeClosePrev; ++idx, tileOffset += MI_ADAPTIVE_PHI_TILE_SIZE){
+      /*get the row and column index of the tile*/
+      getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+      /*compute the row range*/
+      tileRowStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+      tileColStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+      tileRowEnd = min(_numVectors, tileRowStart + MI_ADAPTIVE_PHI_TILE_DIM);
+      tileColEnd = min(_numVectors, tileColStart + MI_ADAPTIVE_PHI_TILE_DIM);
+
+      /*compute each tile*/
+			ssize_t rowOffset = tileOffset;
+      for(int row = tileRowStart; row < tileRowEnd; ++row, rowOffset += MI_ADAPTIVE_PHI_TILE_DIM){
+        for(int col = tileColStart, colOffset = 0; col < tileColEnd; ++col, ++colOffset){
+					if(row <= col){
+            _mutualInfoCorr[(ssize_t)row * _numVectors + col] = hostPrValues[rowOffset + colOffset];
+            _mutualInfoCorr[(ssize_t)col * _numVectors + row] = hostPrValues[rowOffset + colOffset];
+          }
+        }
+      }
+    }
+	}
+	/*transfer the remaining data*/
+	numElems = (indexRangeClosePrev - indexRangeStartPrev) * MI_ADAPTIVE_PHI_TILE_SIZE;
+	if(numElems > 0) {
+		if(numElems > maxPrValuesSize){
+			fprintf(stderr, "Error: %ld > %ld\n", numElems, maxPrValuesSize);
+		}
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(hostPrValues[0:numElems]) MI_ADAPTIVE_MIC_REUSE)
+
+    /*save the data to the correlation matrix*/
+		tileOffset = 0;
+    for(ssize_t idx = indexRangeStartPrev; idx < indexRangeClosePrev; ++idx, tileOffset += MI_ADAPTIVE_PHI_TILE_SIZE){
+      /*get the row and column index of the tile*/
+      getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+      /*compute the row range*/
+      tileRowStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+      tileColStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+      tileRowEnd = min(_numVectors, tileRowStart + MI_ADAPTIVE_PHI_TILE_DIM);
+      tileColEnd = min(_numVectors, tileColStart + MI_ADAPTIVE_PHI_TILE_DIM);
+
+      /*compute each tile*/
+			ssize_t rowOffset = tileOffset;
+      for(int row = tileRowStart; row < tileRowEnd; ++row, rowOffset += MI_ADAPTIVE_PHI_TILE_DIM){
+        for(int col = tileColStart, colOffset = 0; col < tileColEnd; ++col, ++colOffset){
+					if(row <= col){
+            _mutualInfoCorr[(ssize_t)row * _numVectors + col] = hostPrValues[rowOffset + colOffset];
+            _mutualInfoCorr[(ssize_t)col * _numVectors + row] = hostPrValues[rowOffset + colOffset];
+          }
+        }
+      }
+    }
+	}
+
+	/*release memory on the Xeon Phi*/
+#pragma offload_transfer target(mic: _micIndex) \
+		nocopy(vectors : MI_ADAPTIVE_MIC_FREE) \
+		nocopy(inValues: MI_ADAPTIVE_MIC_FREE) \
+		nocopy(outValues: MI_ADAPTIVE_MIC_FREE)
+
+	/*release memory on the host*/
+	for (int i = 0; i < 2; ++i) {
+		mm_free(prValues[i]);
+	}
+
+	/*recored the system time*/
+	t2 = etime = getSysTime();
+	fprintf(stderr, "Computing time: %f seconds\n", t2 - t1);
+	fprintf(stderr, "Overall time: %f seconds\n", etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _mutualInfoCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+
+}
+
+template<typename FloatType, typename RankType>
+__attribute__((target(mic))) void MIAdaptive<FloatType, RankType>::_runSingleXeonPhiCore(
+		FloatType* __restrict__ vectors, FloatType* __restrict__ prValues,
+		const ssize_t indexRangeStart, const ssize_t indexRangeClose) {
+
+#ifdef __MIC__
+	const int tileDim = (_numVectors + MI_ADAPTIVE_PHI_TILE_DIM -1) / MI_ADAPTIVE_PHI_TILE_DIM;
+
+#pragma omp parallel
+	{
+		ssize_t offset, idx, colOffset;
+		int row, col, tileRowStart, tileRowEnd, tileColStart, tileColEnd;
+		FloatType x, y, prod;
+		FloatType* __restrict__ vecX;
+		FloatType* __restrict__ vecY;
+		const int partitionSize = _vectorSize + 1;
+		RankType* rowPtrX = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+		RankType* rowPtrY = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+		RankType* colIndices = (RankType*)mm_malloc(_vectorSize * sizeof(RankType), 64);
+		Window<RankType>* partitions = (Window<RankType>*)mm_malloc(partitionSize * sizeof(Window<RankType>), 64);
+
+		/*each thread processes one tile at a time*/
+#pragma omp for schedule(guided, 1)
+		for(idx = indexRangeStart; idx < indexRangeClose; ++idx){
+
+			/*get the row and column index of the tile*/
+			getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+			/*compute row range*/
+			tileRowStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+			tileRowEnd = tileRowStart + MI_ADAPTIVE_PHI_TILE_DIM;
+			if(tileRowEnd > _numVectors) {
+				tileRowEnd = _numVectors;
+			}
+			/*compute column range*/
+      tileColStart *= MI_ADAPTIVE_PHI_TILE_DIM;
+      tileColEnd = tileColStart + MI_ADAPTIVE_PHI_TILE_DIM;
+      if(tileColEnd > _numVectors) {
+        tileColEnd = _numVectors;
+      }
+
+			/*compute global offset of this tile*/
+			offset = (idx - indexRangeStart) * MI_ADAPTIVE_PHI_TILE_SIZE;
+
+			/*compute the tile*/
+			vecX = vectors + tileRowStart * _vectorSizeAligned;
+			for(row = tileRowStart; row < tileRowEnd; ++row, vecX += _vectorSizeAligned, offset += MI_ADAPTIVE_PHI_TILE_DIM){
+				/*column*/
+				vecY = vectors + tileColStart * _vectorSizeAligned;
+				for(col = tileColStart, colOffset = 0; col < tileColEnd; ++col, vecY += _vectorSizeAligned, colOffset++){
+
+					/*compute mututal information*/
+					if(row <= col){
+						prValues[offset + colOffset] = _computeMIAdaptive(vecX, vecY, rowPtrY, colIndices, rowPtrX, partitions, partitionSize);
+					}
+				}
+			}
+		}
+
+		/*release memory*/
+		mm_free(rowPtrX);
+		mm_free(rowPtrY);
+		mm_free(colIndices);
+		mm_free(partitions);
+	}
+
+#endif	/*__MIC__*/
+}
+#endif	/*with phi*/
+
+
+#ifdef WITH_MPI
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::runMPICPU() {
+	double stime, etime;
+	const int tileDim = (_numVectors + MI_ADAPTIVE_MPI_TILE_DIM -1) / MI_ADAPTIVE_MPI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	const ssize_t numPairs = (ssize_t)(_numVectors + 1) * _numVectors / 2;	/*include self-vs-self*/
+	ssize_t numPairsProcessed = 0, totalNumPairs;
+
+#ifdef VERBOSE
+  if(_rank == 0) fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*record the system time*/
+	MPI_Barrier(MPI_COMM_WORLD);
+	stime = getSysTime();
+
+	/*compute the mean and variance*/
+	int row, col;
+	int loRowRange, hiRowRange;
+	int loColRange, hiColRange;
+	int startColPerRow, endColPerRow;
+	int rowStart, rowEnd, colStart, colEnd;
+	FloatType* __restrict__ vecX;
+	FloatType* __restrict__ vecY;
+
+	/*allocate buffer*/
+	ssize_t mutualInfoCorrSize = (numTiles + _numProcs - 1) / _numProcs;
+	_mutualInfoCorr = (FloatType*)mm_malloc(mutualInfoCorrSize * MI_ADAPTIVE_MPI_TILE_SIZE * sizeof(FloatType), 64);
+	if(!_mutualInfoCorr) {
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n", __LINE__, __FILE__);
+		exit(-1);
+	}
+	_mutualInfoTileIndex = (ssize_t*)mm_malloc(mutualInfoCorrSize * sizeof(ssize_t), 64);
+	if(!_mutualInfoTileIndex){
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n", __LINE__, __FILE__);
+		exit(-1);
+	}
+
+	/*perform rank-transformation*/
+	ssize_t chunkSize = (_numVectors + _numProcs - 1) / _numProcs;
+	loRowRange = _rank * chunkSize;
+	hiRowRange = min(_numVectors, (_rank + 1) * (int) chunkSize);
+	vecX = _vectors + loRowRange * _vectorSizeAligned;
+
+	typedef CustomPair<FloatType, int> MyPair;
+	MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+	for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+			_vectorSizeAligned) {
+ 
+  	/*get the rank vector*/
+		int j, rank;
+   	for(j = 0; j < _vectorSize; ++j){
+   		ranks[j]._first = vecX[j];
+    	ranks[j]._second = j;
+   	}
+   	qsort(ranks, _vectorSize, sizeof(MyPair), MyPair::ascendFirst);
+		/*ranks start from zero*/
+   	for(j = 0, rank = 0; j < _vectorSize - 1; ++j){
+     	vecX[ranks[j]._second] = rank;
+    	if(ranks[j]._first != ranks[j + 1]._first){
+      	rank++;
+     	}
+    }
+   	vecX[ranks[j]._second] = rank;
+	}
+	mm_free(ranks);
+
+	/*all gather to communicate the data*/
+	int* displs = (int*)mm_malloc(_numProcs * sizeof(int), 64);
+	int* recvCounts = (int*)mm_malloc(_numProcs * sizeof(int), 64);
+	row = 0;
+	for(int i = 0; i < _numProcs; ++i) {
+		displs[i] = row * _vectorSizeAligned;
+		recvCounts[i] = min((int)chunkSize, _numVectors - row) * _vectorSizeAligned;
+		row += chunkSize;
+	}
+	const int key = loRowRange < hiRowRange ? 1 : 0;
+	MPI_Comm mycomm;
+	MPI_Comm_split(MPI_COMM_WORLD, key, _rank, &mycomm);
+	if(typeid(FloatType) == typeid(float)) {
+		if(key) {
+			MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_FLOAT, _vectors, recvCounts, displs, MPI_FLOAT, mycomm);
+		}
+	} else if(typeid(FloatType) == typeid(double)) {
+		if(key) {
+			MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DOUBLE, _vectors, recvCounts, displs, MPI_DOUBLE, mycomm);
+		}
+	} else {
+		printf("Only support floating-point values\n");
+		return;
+	}
+	mm_free(displs);
+	mm_free(recvCounts);
+	MPI_Comm_free(&mycomm);
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	/*allocate memory for prefix sums over X and Y*/
+	const int partitionSize = _vectorSize + 1;
+	RankType* rowPtrX = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+	RankType* rowPtrY = (RankType*)mm_malloc((_vectorSize + 1) * sizeof(RankType), 64);
+	RankType* colIndices = (RankType*)mm_malloc(_vectorSize * sizeof(RankType), 64);
+	Window<RankType>* partitions = (Window<RankType>*)mm_malloc(partitionSize * sizeof(Window<RankType>), 64);
+
+	const ssize_t inc = 1;
+	ssize_t tile = 0, colOffset, rowOffset, shrdCounter = 0;
+	int tileRow, tileCol;
+	MPI_Win shrdCounterWin;
+	if(_useShrdCounter){
+		/*create a shared window*/
+		MPI_Win_create(&shrdCounter, sizeof(ssize_t), MPI_INT64_T, MPI_INFO_NULL, MPI_COMM_WORLD, &shrdCounterWin);
+
+	}else if(_rank == MI_ADAPTIVE_ROOT){
+		int numExits = 1;
+		ssize_t msg;
+		MPI_Status status;
+		while(numExits < _numProcs){
+			/*wait for message from other processes*/
+			MPI_Recv(&msg, 1, MPI_INT64_T, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+
+			/*check message type*/
+			if(msg){
+				/*request for new job*/
+				MPI_Send(&tile, 1, MPI_INT64_T, status.MPI_SOURCE, 1, MPI_COMM_WORLD);
+				tile++;
+			}else{
+				/*increase the number of processes that finished*/
+				++numExits;
+			}
+		}
+	}
+
+	ssize_t offset = 0;
+	while(_useShrdCounter || _rank != MI_ADAPTIVE_ROOT){
+		/*get a tile index*/
+		if(_useShrdCounter){
+			MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, shrdCounterWin);
+			MPI_Fetch_and_op(&inc, &tile, MPI_INT64_T, 0, 0, MPI_SUM, shrdCounterWin);
+			MPI_Win_unlock(0, shrdCounterWin);
+		}else{
+			/*send request and receive notice*/
+			MPI_Sendrecv(&inc, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 0, &tile, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
+
+		if(tile >= numTiles){
+			break;
+		}
+
+		/*reallocate memory?*/
+		if(offset >= mutualInfoCorrSize * MI_ADAPTIVE_MPI_TILE_SIZE){
+			mutualInfoCorrSize *= 2;	/*double the space*/
+			FloatType* addr = (FloatType*)mm_malloc(mutualInfoCorrSize * MI_ADAPTIVE_MPI_TILE_SIZE * sizeof(FloatType), 64);
+			if(!addr){
+				fprintf(stderr, "Memory allocation failed\n");
+				exit(-1);
+			}
+			memcpy(addr, _mutualInfoCorr, offset * sizeof(FloatType));
+			mm_free(_mutualInfoCorr);
+			_mutualInfoCorr = addr;
+
+			ssize_t* addr2 = (ssize_t*)mm_malloc(mutualInfoCorrSize * sizeof(ssize_t), 64);
+			if(!addr2){
+				fprintf(stderr, "Memory allocation failed\n");
+				exit(-1);
+			}
+			memcpy(addr2, _mutualInfoTileIndex, offset / MI_ADAPTIVE_MPI_TILE_SIZE * sizeof(ssize_t));
+			mm_free(_mutualInfoTileIndex);
+			_mutualInfoTileIndex = addr2;
+		}
+
+		/*get the row and column index of the tile*/
+		getTileCoordinate(tile, tileDim, tileRow, tileCol);
+
+		/*compute the row range of the tile*/
+		rowStart = tileRow * MI_ADAPTIVE_MPI_TILE_DIM;
+		rowEnd = min(_numVectors, rowStart + MI_ADAPTIVE_MPI_TILE_DIM);
+
+		/*compute the column range of the tile*/
+		colStart = tileCol * MI_ADAPTIVE_MPI_TILE_DIM;
+		colEnd = min(_numVectors, colStart + MI_ADAPTIVE_MPI_TILE_DIM);
+
+		/*compute the tile*/
+		vecX = _vectors + rowStart * _vectorSizeAligned;
+		for(row = rowStart, rowOffset = offset; row < rowEnd; row++, vecX += _vectorSizeAligned, rowOffset += MI_ADAPTIVE_MPI_TILE_DIM){
+			vecY = _vectors + colStart * _vectorSizeAligned;
+			for(col = colStart, colOffset = 0; col < colEnd; col++, vecY += _vectorSizeAligned, colOffset++){
+				/*compute mutual information*/
+				if(row <= col){
+					numPairsProcessed++;	/*statistics*/
+					_mutualInfoCorr[rowOffset + colOffset] = _computeMIAdaptive(vecX, vecY, rowPtrY, colIndices, rowPtrX, partitions, partitionSize);
+				}
+			}
+		}
+		/*save the corresponding tile index*/
+		_mutualInfoTileIndex[offset / MI_ADAPTIVE_MPI_TILE_SIZE] = tile;
+		
+		/*move to the next tile*/
+		offset += MI_ADAPTIVE_MPI_TILE_SIZE;
+	}
+
+	/*if not using shared counter*/
+	if(!_useShrdCounter && _rank != MI_ADAPTIVE_ROOT){
+		/*send an exit flag*/
+		const ssize_t exitFlag = 0;
+		MPI_Send(&exitFlag, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 0, MPI_COMM_WORLD);
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
+	if(_useShrdCounter){
+		MPI_Win_free(&shrdCounterWin);
+	}
+	mm_free(rowPtrX);
+	mm_free(rowPtrY);
+	mm_free(colIndices);
+	mm_free(partitions);
+
+	/*compute the total number of edges*/
+	MPI_Reduce(&numPairsProcessed, &totalNumPairs, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+
+	/*recored the system time*/
+	etime = getSysTime();
+	if (_rank == 0) {
+		fprintf(stderr, "Overall time (%ld pairs): %f seconds\n", totalNumPairs, etime - stime);
+	}
+}
+
+#ifdef WITH_PHI
+template<typename FloatType, typename RankType>
+void MIAdaptive<FloatType, RankType>::runMPIXeonPhi() {
+	const int tileDim = (_numVectors + MI_ADAPTIVE_PHI_TILE_DIM - 1) / MI_ADAPTIVE_PHI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	ssize_t indexRangeStart, indexRangeEnd;
+	double stime, etime;
+	FloatType* prValues;
+
+#ifdef VERBOSE
+  if(_rank == 0) fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*set the number of threads on the Xeon Phi*/
+#pragma offload target(mic:_micIndex) inout(_numMICThreads)
+	{
+		/*set the number of threads*/
+		if(_numMICThreads < MI_ADAPTIVE_PHI_TILE_DIM) {
+			_numMICThreads = omp_get_num_procs();
+		}
+		_numMICThreads = _numMICThreads / MI_ADAPTIVE_PHI_TILE_DIM * MI_ADAPTIVE_PHI_TILE_DIM;
+		omp_set_num_threads(_numMICThreads);
+	}
+
+	/*allocate intermediate buffer on the Xeon Phi*/
+	ssize_t maxPrValuesSize = MI_ADAPTIVE_MPI_PHI_BUFFER_SIZE / sizeof(FloatType); /*a total of 512 MB*/
+	ssize_t alignment = _numMICThreads * MI_ADAPTIVE_PHI_TILE_SIZE;
+	maxPrValuesSize = (maxPrValuesSize + alignment - 1) / alignment * alignment;
+	prValues = (FloatType*) mm_malloc(maxPrValuesSize * sizeof(FloatType), 64);
+	if (!prValues) {
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+				__LINE__, __FILE__);
+		exit(-1);
+	}
+
+	/*allocate buffer*/
+	ssize_t mutualInfoCorrSize = (numTiles + _numProcs - 1) / _numProcs;
+	_mutualInfoCorr = (FloatType*)mm_malloc(mutualInfoCorrSize * MI_ADAPTIVE_PHI_TILE_SIZE * sizeof(FloatType), 64);
+	if(!_mutualInfoCorr) {
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n", __LINE__, __FILE__);
+		exit(-1);
+	}
+	_mutualInfoTileIndex = (ssize_t*)mm_malloc(mutualInfoCorrSize * sizeof(ssize_t), 64);
+	if(!_mutualInfoTileIndex){
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n", __LINE__, __FILE__);
+		exit(-1);
+	}
+
+	FloatType* __restrict__ vectors = _vectors;
+	/*transfer data*/
+	if(_rank == 0) {
+		fprintf(stderr, "Start transfering data\n");
+	}
+#pragma offload_transfer target(mic: _micIndex) \
+	in(vectors: length(_numVectors * _vectorSizeAligned) MI_ADAPTIVE_MIC_ALLOC) \
+	nocopy(prValues: length(maxPrValuesSize) MI_ADAPTIVE_MIC_ALLOC)
+
+	/*record system time*/
+	if(_rank == 0) {
+		fprintf(stderr, "Start computing\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
+	stime = getSysTime();
+
+	/*rank transform*/
+	double t1 = getSysTime();
+#pragma offload target(mic:_micIndex) \
+	nocopy(vectors: MI_ADAPTIVE_MIC_REUSE) \
+	nocopy(prValues: MI_ADAPTIVE_MIC_REUSE)
+	{
+#pragma omp parallel
+		{
+			int row, col, rank, j;
+			int chunkSize, loRowRange, hiRowRange;
+			FloatType x, y, r, meanX, varX;
+			FloatType* __restrict__ vecX;
+			const int tid = omp_get_thread_num();
+			const int nthreads = omp_get_num_threads();
+			const FloatType avg = 1.0 / (FloatType)_vectorSize;
+			typedef CustomPair<FloatType, int> MyPair;
+			MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+			/*compute mean and variance*/
+			chunkSize = (_numVectors + nthreads - 1) / nthreads;
+			loRowRange = tid * chunkSize;
+			hiRowRange = (tid + 1) * chunkSize;
+			if(hiRowRange > _numVectors) {
+				hiRowRange = _numVectors;
+			}
+
+			vecX = vectors + loRowRange * _vectorSizeAligned;
+			for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+					_vectorSizeAligned) {
+        /*get the rank vector*/
+        for(j = 0; j < _vectorSize; ++j){
+          ranks[j]._first = vecX[j];
+          ranks[j]._second = j;
+        }
+        qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, int>), CustomPair<FloatType, int>::ascendFirst);
+				/*ranks start from zero*/
+ 		   	for(j = 0, rank = 0; j < _vectorSize - 1; ++j){
+    			vecX[ranks[j]._second] = rank;
+      		if(ranks[j]._first != ranks[j + 1]._first){
+        		rank++;
+      		}
+    		}
+				vecX[ranks[j]._second] = rank;
+			}
+			mm_free(ranks);
+		}
+	}
+	double t2 = getSysTime();
+	if(_rank == 0) fprintf(stderr, "time for rank-transformation: %f seconds\n", t2 - t1);
+
+	ssize_t shrdCounter = 0, offset = 0, numElems;
+	const ssize_t maxNumTilesPerPass = maxPrValuesSize / MI_ADAPTIVE_PHI_TILE_SIZE;
+  MPI_Win shrdCounterWin;
+
+	indexRangeStart = 0;
+	if(_useShrdCounter){
+		/*create a shared window*/
+	  MPI_Win_create(&shrdCounter, sizeof(ssize_t), MPI_INT64_T, MPI_INFO_NULL, MPI_COMM_WORLD, &shrdCounterWin);
+
+  }else if(_rank == MI_ADAPTIVE_ROOT){
+    int numExits = 1;
+    ssize_t msg;
+    MPI_Status status;
+    while(numExits < _numProcs){
+      /*wait for message from other processes*/
+      MPI_Recv(&msg, 1, MPI_INT64_T, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+
+      /*check message type*/
+      if(msg){
+        /*request for new job*/
+        MPI_Send(&indexRangeStart, 1, MPI_INT64_T, status.MPI_SOURCE, 1, MPI_COMM_WORLD);
+
+				/*compute the next starting index*/
+				indexRangeStart += maxNumTilesPerPass;
+      }else{
+        /*increase the number of processes that finished*/
+        ++numExits;
+      }
+    }
+	}
+
+ 	while(_useShrdCounter || _rank != MI_ADAPTIVE_ROOT){
+		/*get the starting tile index*/
+		if(_useShrdCounter){
+ 	   	MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, shrdCounterWin);
+  	  MPI_Fetch_and_op(&maxNumTilesPerPass, &indexRangeStart, MPI_INT64_T, 0, 0, MPI_SUM, shrdCounterWin);
+    	MPI_Win_unlock(0, shrdCounterWin);
+		}else{
+      /*send request and receive notice*/
+      MPI_Sendrecv(&maxNumTilesPerPass, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 0, &indexRangeStart, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+		indexRangeEnd = min(numTiles, indexRangeStart + maxNumTilesPerPass);
+		printf("rank %d: %ld %ld\n", _rank, indexRangeStart, indexRangeEnd);
+		if(indexRangeStart >= numTiles){
+			break;
+		}
+
+		/*compute the last tile index*/
+
+		/*get the toal number of pairs processed in this run*/
+		numElems = (indexRangeEnd - indexRangeStart) * MI_ADAPTIVE_PHI_TILE_SIZE;
+
+     /*reallocate memory?*/
+     if(offset + numElems >= mutualInfoCorrSize * MI_ADAPTIVE_PHI_TILE_SIZE){
+			/*roughly double the space*/
+       mutualInfoCorrSize += (offset + numElems) / MI_ADAPTIVE_PHI_TILE_SIZE;
+       FloatType* addr = (FloatType*)mm_malloc(mutualInfoCorrSize * MI_ADAPTIVE_PHI_TILE_SIZE * sizeof(FloatType), 64);
+       if(!addr){
+         fprintf(stderr, "Memory allocation failed\n");
+         exit(-1);
+       }
+       memcpy(addr, _mutualInfoCorr, offset * sizeof(FloatType));
+       mm_free(_mutualInfoCorr);
+       _mutualInfoCorr = addr;
+
+       ssize_t* addr2 = (ssize_t*)mm_malloc(mutualInfoCorrSize * sizeof(ssize_t), 64);
+       if(!addr2){
+         fprintf(stderr, "Memory allocation failed\n");
+         exit(-1);
+       }
+       memcpy(addr2, _mutualInfoTileIndex, offset / MI_ADAPTIVE_PHI_TILE_SIZE * sizeof(ssize_t));
+       mm_free(_mutualInfoTileIndex);
+       _mutualInfoTileIndex = addr2;
+     }
+
+		/*one round of computation*/
+		#pragma offload target(mic:_micIndex) \
+			nocopy(vectors: MI_ADAPTIVE_MIC_REUSE) \
+			nocopy(prValues: MI_ADAPTIVE_MIC_REUSE)
+		{
+			/*compute*/
+			_runSingleXeonPhiCore(vectors, prValues, indexRangeStart, indexRangeEnd);
+		}
+
+		/*transfer back the data*/
+		#pragma offload_transfer target(mic:_micIndex) out(prValues[0:numElems]:into(_mutualInfoCorr[offset:numElems]) MI_ADAPTIVE_MIC_REUSE)
+
+		/*save the corresponding starting tile index*/
+		for(ssize_t tile = indexRangeStart, base = offset / MI_ADAPTIVE_PHI_TILE_SIZE; tile < indexRangeEnd; ++tile){
+			_mutualInfoTileIndex[base++] = tile;
+		}
+
+		/*increase the offset*/
+		offset += numElems;
+	}
+
+  /*if not using shared counter*/
+  if(!_useShrdCounter && _rank != MI_ADAPTIVE_ROOT){
+    /*send an exit flag*/
+    const ssize_t exitFlag = 0;
+    MPI_Send(&exitFlag, 1, MPI_INT64_T, MI_ADAPTIVE_ROOT, 0, MPI_COMM_WORLD);
+  }
+	MPI_Barrier(MPI_COMM_WORLD);
+	if(_useShrdCounter){
+		MPI_Win_free(&shrdCounterWin);
+	}
+	
+	etime = getSysTime();
+	if(_rank == 0) {
+		fprintf(stderr, "Overall time: %f seconds\n", etime - stime);
+	}
+
+	/*release memory on the Xeon Phi*/
+#pragma offload_transfer target(mic: _micIndex) \
+	nocopy(vectors : MI_ADAPTIVE_MIC_FREE) \
+	nocopy(prValues: MI_ADAPTIVE_MIC_FREE)
+
+	/*release memory on the host*/
+	mm_free(prValues);
+
+}
+#endif	/*with phi*/
+#endif	/*with mpi*/
+
+#endif /* PEARSONR_HPP_ */

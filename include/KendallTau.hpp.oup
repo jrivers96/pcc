@@ -1,0 +1,1474 @@
+/*
+ * KendallTau.hpp
+ *
+ *  Created on: Mar 22, 2016
+ *  Author: Liu, Yongchao
+ *  Affiliation: School of Computational Science & Engineering
+ *  						Georgia Institute of Technology, Atlanta, GA 30332
+ *  URL: www.liuyc.org
+ */
+
+#ifndef KENDALL_TAU_HPP_
+#define KENDALL_TAU_HPP_
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <omp.h>
+#include <vector>
+#include <list>
+#include <typeinfo>
+using namespace std;
+#pragma once
+
+#include <DeviceUtils.hpp>
+
+#ifdef WITH_MPI
+#include <mpi.h>
+#endif	/*with mpi*/
+
+#ifdef WITH_PHI
+#include <immintrin.h>
+/*for device memroy allocation*/
+#define KT_MIC_REUSE alloc_if(0) free_if(0)
+#define KT_MIC_ALLOC alloc_if(1) free_if(0)
+#define KT_MIC_FREE  length(0) alloc_if(0) free_if(1)
+#define KT_MIC_ALLOC_FREE alloc_if(1) free_if(1)
+#endif	/*with phi*/
+
+/*tile size*/
+#define KT_PHI_TILE_DIM	4		/*must be divided by 236*/
+#define KT_PHI_TILE_SIZE	(KT_PHI_TILE_DIM * KT_PHI_TILE_DIM)
+#define KT_MT_TILE_DIM		8
+#define KT_MPI_TILE_DIM	8
+#define KT_MPI_TILE_SIZE 	(KT_MPI_TILE_DIM * KT_MPI_TILE_DIM)
+
+/*maximum dimension size*/
+#ifndef KT_MAX_MAT_DIM
+#define KT_MAX_MAT_DIM			(1<<25)
+#endif
+
+/*Macros defined for Kendall Tau kernel*/	
+#define ONE_THREAD_PER_TILE 0	/*use one thread to process a tile*/
+#define FOUR_HARDWARE_THREADS_PER_TILE 1	/*use four threads to process one tile*/
+
+/*use one thread per tile by default*/
+#define KENDALL_TAU_KERNEL ONE_THREAD_PER_TILE
+
+/*which implementation to use*/
+#define KT_BRUTE_FORCE_TAU_A  0
+#define KT_MERGE_SORT_TAU_A		1
+#define KT_MERGE_SORT_TAU_B   2
+
+/*maximum Xeon Phi buffer size*/
+#define KT_PHI_BUFFER_SIZE (1 << 29)
+
+/*software barrier for hardware threads per core*/
+//#define SOFT_BARRIER	1	
+
+/*template class with out-of-place merge*/
+template<typename FloatType, typename RankType=int>
+class KendallTau {
+public:
+	KendallTau(int numVectors, int vectorSize, int numCPUThreads,
+			int numMICThreads, int micIndex, int rank, int numProcs);
+	~KendallTau();
+
+	inline FloatType* getVectors() {
+		return _vectors;
+	}
+	inline int getNumVectors() {
+		return _numVectors;
+	}
+	inline int getVectorSize() {
+		return _vectorSize;
+	}
+	inline int getVectorSizeAligned() {
+		return _vectorSizeAligned;
+	}
+	inline void setVariant(const int variant)
+	{
+		_kendallVariant = variant;
+	}
+
+	/*generate random data*/
+	void generateRandomData(const int seed = 11);
+
+	/*single threaded implementation*/
+	void runSingleThreaded();
+
+	/*multiple threads with optimized*/
+	void runMultiThreaded();
+
+#ifdef WITH_PHI
+	/*exon phi*/
+	void runSingleXeonPhi();
+	void runSingleXeonPhiMat();
+#endif	/*with phi*/
+
+	/*MPI*/
+#ifdef WITH_MPI
+	void runMPICPU();
+#ifdef WITH_PHI
+	void runMPIXeonPhi();
+#endif	/*with phi*/
+#endif	/*with mpi*/
+
+	/*transpose matrix*/
+	void transpose();
+
+private:
+	FloatType* _vectors; /*vector data. Stored consecutively and each vector contains an aligned number of elements*/
+	int _numVectors; /*number of vectors in the data*/
+	int _vectorSize; /*effective vector size, i.e. the real number of elements per vector*/
+	int _vectorSizeAligned; /*aligned to vector size to 16 so that the address is aligned to 64 byte boundary*/
+	//int _maxPartitionSize; /*maximum partition size for asynchronous mode*/
+	int _numCPUThreads; /*the number of CPU threads*/
+	int _numMICThreads; /*the number of MIC threads*/
+	int _micIndex;	/*index of MIC used by this processs*/
+	int _rank;			/*process rank*/
+	int _numProcs;	/*number of MPI processes*/
+	int _tiledPrMatrix; /*how the pearson correlation matrix is stored*/
+	FloatType* _kendallTauCorr; /*pearson correlation matrix*/
+	int _kendallVariant;
+
+	/*used for software barrier*/
+	int* _barriers;
+	int* _counts;
+
+	/*for Xeon Phi*/
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _softBarrierInit(const int numSlots, const int numThreads)
+	{
+		_barriers = (int*)mm_malloc(numSlots * sizeof(int), 64);
+		_counts = (int*)mm_malloc(numSlots * sizeof(int), 64);
+		for(int i = 0; i < numSlots; ++i){
+			_counts[i] = numThreads;
+			_barriers[i] = 0;
+		}
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _softBarrierFinalize()
+	{
+		mm_free(_barriers);
+		mm_free(_counts);
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _softBarrierSync(const int barrierIndex, const int numThreads, int& localSense)
+	{
+		localSense = !localSense;	/*inverse local variable*/
+		if(__sync_fetch_and_sub(_counts + barrierIndex, 1) == 1){
+			__sync_fetch_and_add(_counts + barrierIndex, numThreads);
+			__sync_bool_compare_and_swap(_barriers + barrierIndex, !localSense, localSense);
+			//_barriers[barrierIndex] = localSense;
+			//_counts[barrierIndex] = numThreads;
+		}else{
+			//while(_barriers[barrierIndex] != localSense);
+			while(__sync_fetch_and_sub(_barriers + barrierIndex, 0) != localSense);
+		}
+	}
+
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void _runSingleXeonPhiCore(
+			FloatType* __restrict__ vectors, FloatType* __restrict__ prValues, const ssize_t indexRangeStart, const ssize_t indexRangeClose);
+	
+	/*compute the correlaton coefficient*/
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	FloatType _computeKTCorr(CustomPair<RankType, RankType>* data, CustomPair<RankType, RankType>*mergeBuffer, 
+					const int numElems, FloatType* vecX, FloatType* vecY);
+
+	/*static function members*/
+public:
+	/*when matrix dimension size is large than 2^21, we should use long double instead of double*/
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	inline void getCoordinate(const ssize_t globalIndex,
+			const ssize_t matrixDimSize, int& row, int& col) {
+#if KT_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+		mydouble p, q;
+		p = static_cast<mydouble>(matrixDimSize - 1);
+		q = static_cast<mydouble>(globalIndex);
+		row = (int) ceil(p - 0.5 - sqrt(p * p + p - 2 * (q + 1) + 0.25));
+		col = row
+				+ (globalIndex - (2 * (matrixDimSize - 1) - row + 1) * row / 2)
+				+ 1;
+	}
+
+	/*conditions: row < col*/
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	inline ssize_t getGlobalIndex(const ssize_t matrixDimSize, const int row,
+			const int col) {
+#if KT_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+
+		mydouble p, q;
+		p = static_cast<mydouble>(matrixDimSize);
+
+		return (ssize_t) ((p - 1 - 0.5 * (row - 1)) * row + col - (row + 1));
+	}
+
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	inline void getTileCoordinate(const ssize_t globalIndex,
+			const ssize_t tileDim, int& row, int& col) {
+#if KT_MAX_MAT_DIM < (1 << 25)
+		typedef double mydouble;
+#else
+		typedef long double mydouble;
+#endif
+		mydouble p, q;
+		p = static_cast<mydouble>(tileDim);
+		q = static_cast<mydouble>(globalIndex);
+		row = (int) ceil(p - 0.5 - sqrt(p * p + p - 2 * (q + 1) + 0.25));
+		col = row + (globalIndex - (2 * tileDim - row + 1) * row / 2);
+	}
+
+	/*conditions: row <= col*/
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	inline ssize_t getTileGlobalIndex(const ssize_t matrixDimSize, const int row,
+		const int col) {
+#if KT_MAX_MAT_DIM < (1 << 25)
+    typedef double mydouble;
+#else
+    typedef long double mydouble;
+#endif
+
+    mydouble p, q;
+    p = static_cast<mydouble>(matrixDimSize);
+
+    return (ssize_t) ((p - 0.5 * (row - 1)) * row + col - row);
+	}
+
+	inline double getSysTime() {
+		double dtime;
+		struct timeval tv;
+
+		gettimeofday(&tv, NULL);
+
+		dtime = (double) tv.tv_sec;
+		dtime += (double) (tv.tv_usec) / 1000000.0;
+
+		return dtime;
+	}
+
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline void* mm_malloc(ssize_t size, ssize_t alignment)
+	{
+		return _mm_malloc(size, alignment);
+	}
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline void mm_free(void* buffer)
+	{
+		_mm_free(buffer);
+	}
+
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+	inline int getSign(const float x)
+	{
+		return (x > 0) - (x < 0);
+	}
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+  inline int getSign(const double x)
+  {
+    return (x > 0) - (x < 0);
+  }
+};
+
+template<typename FloatType, typename RankType>
+KendallTau<FloatType, RankType>::KendallTau(int numVectors, int vectorSize, int numCPUThreads,
+		int numMICThreads, int micIndex, int rank, int numProcs) {
+	int alignment = 64 / sizeof(FloatType);	/*align to 64 byte boundary*/
+	_numVectors = numVectors;
+	_vectorSize = vectorSize;
+	_vectorSizeAligned = (_vectorSize + alignment - 1) / alignment * alignment;
+	_numCPUThreads = numCPUThreads;
+	_numMICThreads = numMICThreads;
+	_micIndex = micIndex; /*index of mic device*/
+	_rank = rank;
+	_numProcs = numProcs;
+	_kendallVariant = KT_MERGE_SORT_TAU_B;
+
+	/*check the number of vectors*/
+	if (_numVectors > KT_MAX_MAT_DIM) {
+		fprintf(stderr,
+				"The number of vectors exceeds the maximum limit (%ld)\n",
+				(ssize_t) KT_MAX_MAT_DIM);
+		exit(-1);
+	}
+
+	/*allocate space*/
+	_kendallTauCorr = NULL;
+
+	/*align each vector*/
+	_vectors = (FloatType*) mm_malloc(
+			(ssize_t)_numVectors * _vectorSizeAligned * sizeof(FloatType), 64);
+	if (!_vectors) {
+		fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+		__LINE__, __FILE__);
+		exit(-1);
+	}
+}
+
+template<typename FloatType, typename RankType>
+KendallTau<FloatType, RankType>::~KendallTau() {
+	if (_vectors) {
+		mm_free(_vectors);
+	}
+	if (_kendallTauCorr) {
+		mm_free(_kendallTauCorr);
+	}
+}
+
+template<typename FloatType, typename RankType>
+FloatType KendallTau<FloatType, RankType>::_computeKTCorr(CustomPair<RankType, RankType>* data, CustomPair<RankType, RankType>* mergeBuffer,
+					const int numElems, FloatType* vecX, FloatType* vecY)
+{
+	long double corr;
+	typedef CustomPair<RankType, RankType> MyPair;
+	const ssize_t numRankPairs = (ssize_t)numElems * (numElems - 1) / 2;
+	ssize_t numTiesX, numTiesY, numTiesXY, numSwaps, nominator;
+
+	if(_kendallVariant == KT_BRUTE_FORCE_TAU_A){
+		double sign;
+		FloatType xi, yi;
+		nominator = 0;
+
+		for(int i = 1; i < numElems; ++i){
+			xi = vecX[i];
+			yi = vecY[i];
+#pragma vector aligned
+#pragma simd reduction(+:nominator)
+			for(int j = 0; j < i; ++j){
+				sign = (xi - vecX[j]) * (yi - vecY[j]);
+				nominator += getSign(sign);
+			}
+		}
+		/*compute the correlation*/
+		corr = (long double)nominator / numRankPairs;
+	}else if(_kendallVariant == KT_MERGE_SORT_TAU_A){/*tau-a*/
+
+		/*sort pair <X_i, Y_i> in ascending order*/
+		for(int i = 0; i < numElems; ++i){
+			data[i]._first = vecX[i];
+			data[i]._second = vecY[i];
+		}
+		qsort(data, numElems, sizeof(MyPair), MyPair::ascendPair);
+
+		/*count the number of swaps*/
+		numSwaps = MyPair::knightMergeSort(data, mergeBuffer, numElems);
+
+		/*compute Tau-a by ignoring the ties in x and y*/
+		nominator = numRankPairs - 2 * numSwaps;
+	 
+		/*compute correlation*/
+		corr = (long double)nominator / numRankPairs;
+
+	}else{	/*Tau-b*/
+		/*sort pair <X_i, Y_i> in ascending order*/
+		for(int i = 0; i < numElems; ++i){
+			data[i]._first = vecX[i];
+			data[i]._second = vecY[i];
+		}
+		qsort(data, numElems, sizeof(MyPair), MyPair::ascendPair);
+
+		/*count the number of ties in X and joint ties in X and Y*/
+		MyPair::countNumTiesFirstPair(data, numElems, numTiesX, numTiesXY);
+
+		/*count the number of swaps*/
+		numSwaps = MyPair::knightMergeSort(data, mergeBuffer, numElems);
+
+		/*count the number of ties in Y*/
+		numTiesY = MyPair::countNumTiesSecond(data, numElems);
+
+		/*compute Tau-b*/
+		nominator = numRankPairs - numTiesX - numTiesY + numTiesXY - 2 * numSwaps;
+	 
+		/*compute correlation*/
+		corr = (long double)nominator / sqrtl((numRankPairs - numTiesX)* (numRankPairs - numTiesY));
+	}
+
+	return corr;
+}
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::generateRandomData(const int seed) {
+	srand48(11);
+	for (int i = 0; i < _numVectors; ++i) {
+		FloatType* __restrict__ dst = _vectors + i * _vectorSizeAligned;
+		for (int j = 0; j < _vectorSize; ++j) {
+			dst[j] = drand48();
+		}
+	}
+}
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::runSingleThreaded() {
+	double stime, etime;
+#ifdef VERBOSE
+	fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*output matrix*/
+	_kendallTauCorr = (FloatType*) mm_malloc(
+			(ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
+	if (!_kendallTauCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+	_tiledPrMatrix = 0;
+
+	/*record the system time*/
+	stime = getSysTime();
+
+	/*allocate vectors for mean and variance*/
+	double t1 = getSysTime();
+	const ssize_t numRankPairs = (ssize_t)_vectorSize * (_vectorSize - 1) / 2;
+	FloatType* __restrict__ vecX;
+	FloatType* __restrict__ vecY;
+
+	vecX = _vectors;
+	CustomPair<FloatType, RankType>* ranks = (CustomPair<FloatType, RankType>*)mm_malloc(_vectorSize * sizeof(CustomPair<FloatType, RankType>), 64);
+	for (int i = 0; i < _numVectors; ++i, vecX += _vectorSizeAligned) {
+
+		/*get the rank vector*/
+		int j, rank;
+		for(j = 0; j < _vectorSize; ++j){
+			ranks[j]._first = vecX[j];
+			ranks[j]._second = j;
+		}
+		qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, RankType>), CustomPair<FloatType, RankType>::ascendFirst);
+		for(j = 0, rank = 1; j < _vectorSize - 1; ++j){
+			vecX[ranks[j]._second] = rank;
+			if(ranks[j]._first != ranks[j + 1]._first){
+				rank++;
+			}
+		}
+		vecX[ranks[j]._second] = rank;
+	}
+	mm_free(ranks);
+	double t2 = getSysTime();
+	fprintf(stderr, "time for ranking and transformation: %f seconds\n", t2 - t1);
+
+
+	/*compare pairwise correlation*/
+	typedef CustomPair<RankType, RankType> MyPair;
+	MyPair * pairs = (MyPair *)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+	MyPair * mergeBuffer = (MyPair *)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+	vecX = _vectors;
+	for (int row = 0; row < _numVectors; ++row, vecX += _vectorSizeAligned) {
+		vecY = _vectors + row * _vectorSizeAligned;
+		for (int col = row; col < _numVectors; ++col, vecY +=
+				_vectorSizeAligned) {
+
+			/*save the correlation coefficient*/
+			FloatType corr = _computeKTCorr(pairs, mergeBuffer, _vectorSize, vecX, vecY);
+			_kendallTauCorr[(ssize_t)row * _numVectors + col] = corr;
+			_kendallTauCorr[(ssize_t)col * _numVectors + row] = corr;
+		}
+	}
+	mm_free(pairs);
+	mm_free(mergeBuffer);
+
+	/*recored the system time*/
+	etime = getSysTime();
+	fprintf(stderr, "Overall time: %f seconds\n",
+			etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _kendallTauCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+}
+
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::runMultiThreaded() {
+	double stime, etime;
+	const int tileDim = (_numVectors + KT_MT_TILE_DIM - 1) / KT_MT_TILE_DIM;
+	const ssize_t numTiles = (ssize_t) (tileDim + 1) * tileDim / 2;
+	ssize_t totalNumPairs = 0;
+	const FloatType avg = 1.0 / (FloatType)_vectorSize;
+
+#ifdef VERBOSE
+  fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*record system time*/
+	stime = getSysTime();
+
+	/*allocate space*/
+	_kendallTauCorr = (FloatType*) mm_malloc(
+			(ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
+	if (!_kendallTauCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+	_tiledPrMatrix = 0;
+
+	/*enter the core computation*/
+	if (_numCPUThreads < 1) {
+		_numCPUThreads = omp_get_num_procs();
+	}
+	omp_set_num_threads(_numCPUThreads);
+
+	/*entering the core loop*/
+#pragma omp parallel reduction(+:totalNumPairs)
+	{
+		ssize_t chunkSize;
+		int row, col;
+		int loRowRange, hiRowRange;
+		int loColRange, hiColRange;
+		int startColPerRow, endColPerRow;
+		int rowStart, rowEnd, colStart, colEnd;
+		ssize_t numPairsProcessed = 0;
+		FloatType* __restrict__ vecX;
+		FloatType* __restrict__ vecY;
+		const int tid = omp_get_thread_num();
+		const int nthreads = omp_get_num_threads();
+		CustomPair<FloatType, RankType>* ranks = (CustomPair<FloatType, RankType>*)mm_malloc(_vectorSize * sizeof(CustomPair<FloatType, RankType>), 64);
+
+		/*compute mean and variance*/
+		chunkSize = (_numVectors + nthreads - 1) / nthreads;
+		loRowRange = tid * chunkSize;
+		hiRowRange = min(_numVectors, (tid + 1) * (int) chunkSize) - 1;
+
+		vecX = _vectors + loRowRange * _vectorSizeAligned;
+		for (row = loRowRange; row <= hiRowRange; ++row, vecX +=
+				_vectorSizeAligned) {
+
+    	/*get the rank vector*/
+			int j, rank;
+    	for(j = 0; j < _vectorSize; ++j){
+      	ranks[j]._first = vecX[j];
+      	ranks[j]._second = j;
+    	}
+    	qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, RankType>), CustomPair<FloatType, RankType>::ascendFirst);
+	    for(j = 0, rank = 1; j < _vectorSize - 1; ++j){
+     		vecX[ranks[j]._second] = rank;
+    	  if(ranks[j]._first != ranks[j + 1]._first){
+        	rank++;
+  	   	}
+ 	   	}
+			vecX[ranks[j]._second] = rank;
+		}
+		mm_free(ranks);
+
+		/*synchronize all threads*/
+#pragma omp barrier
+
+		typedef CustomPair<RankType, RankType> MyPair;
+		MyPair* pairs = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+		MyPair* mergeBuffer = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+		/*compute pairwise correlation coefficient*/
+		chunkSize = (numTiles + nthreads - 1) / nthreads;
+		loRowRange = loColRange = tileDim + 1;
+		if (tid * chunkSize < numTiles) {
+			getTileCoordinate(tid * chunkSize, tileDim, loRowRange, loColRange);
+		}
+		hiRowRange = hiColRange = tileDim;
+		if ((tid + 1) * chunkSize <= numTiles) {
+			getTileCoordinate((tid + 1) * chunkSize - 1, tileDim, hiRowRange,
+					hiColRange);
+		}
+		//fprintf(stderr, "tid (%d): %d %d %d %d\n", tid, loRowRange, loColRange, hiRowRange, hiColRange);
+		for (int tileRow = loRowRange; tileRow <= hiRowRange; tileRow++) {
+			/*compute the effective range per row*/
+			startColPerRow = (tileRow == loRowRange) ? loColRange : tileRow;
+			endColPerRow = (tileRow == hiRowRange) ? hiColRange : tileDim - 1;
+
+			rowStart = tileRow * KT_MT_TILE_DIM;
+			rowEnd = min(_numVectors, rowStart + KT_MT_TILE_DIM);
+			for (int tileCol = startColPerRow; tileCol <= endColPerRow;
+					++tileCol) {
+				colStart = tileCol * KT_MT_TILE_DIM;
+				colEnd = min(_numVectors, colStart + KT_MT_TILE_DIM);
+				/*compute the tile*/
+				vecX = _vectors + rowStart * _vectorSizeAligned;
+				for (row = rowStart; row < rowEnd; ++row, vecX +=
+						_vectorSizeAligned) {
+					vecY = _vectors + colStart * _vectorSizeAligned;
+					for (col = colStart; col < colEnd; ++col, vecY +=
+							_vectorSizeAligned) {
+						if(row > col){
+							continue;
+						}
+						/*statistics*/
+						++numPairsProcessed;
+
+						/*correlation coefficient*/
+						FloatType corr =  _computeKTCorr(pairs, mergeBuffer, _vectorSize, vecX, vecY);
+						_kendallTauCorr[(ssize_t)row * _numVectors + col] = corr;
+						_kendallTauCorr[(ssize_t)col * _numVectors + row] = corr;
+					}
+				}
+			}
+		}
+		mm_free(pairs);
+		mm_free(mergeBuffer);
+
+		/*reduction*/
+		totalNumPairs += numPairsProcessed;
+	} /*#pragma omp paralle*/
+	
+	/*recored the system time*/
+	etime = getSysTime();
+	fprintf(stderr, "Overall time (%ld pairs): %f seconds\n", totalNumPairs,
+			etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _kendallTauCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+
+}
+
+#ifdef WITH_PHI
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::runSingleXeonPhi() {
+	const int tileDim = (_numVectors + KT_PHI_TILE_DIM - 1) / KT_PHI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	ssize_t indexRangeStart, indexRangeClose;
+	ssize_t indexRangeStartPrev, indexRangeClosePrev;
+	double stime, etime;
+	FloatType* prValues[2];
+
+#ifdef VERBOSE
+  fprintf(stderr, "execute function %s\n", __FUNCTION__);
+#endif
+
+	/*set the number of threads on Xeon Phi*/
+#pragma offload target(mic:_micIndex) inout(_numMICThreads)
+	{
+		/*set the number of threads*/
+	#if KENDALL_TAU_KERNEL == ONE_THREAD_PER_TILE
+		if(_numMICThreads < 1){
+			_numMICThreads = omp_get_num_procs();
+		}
+	#else
+		if (_numMICThreads < KT_PHI_TILE_DIM) {
+			_numMICThreads = omp_get_num_procs();
+		}
+		_numMICThreads = _numMICThreads / KT_PHI_TILE_DIM * KT_PHI_TILE_DIM;
+	#endif
+		omp_set_num_threads (_numMICThreads);
+	}
+	fprintf(stderr, "number of threads: %d\n", _numMICThreads);
+
+	/*allocate intermediate memory*/
+	ssize_t maxPrValuesSize = KT_PHI_BUFFER_SIZE / sizeof(FloatType); /*a total of 512 MB*/
+	ssize_t alignment = _numMICThreads * KT_PHI_TILE_SIZE;
+	maxPrValuesSize = (maxPrValuesSize + alignment - 1) / alignment * alignment;
+	for (int i = 0; i < 2; ++i) {
+		prValues[i] = (FloatType*) mm_malloc(
+				maxPrValuesSize * sizeof(FloatType), 64);
+		if (!prValues[i]) {
+			fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+					__LINE__, __FILE__);
+			exit(-1);
+		}
+	}
+
+	/*align to the tile size*/
+	_kendallTauCorr = (FloatType*)mm_malloc((ssize_t)_numVectors * _numVectors * sizeof(FloatType), 64);
+	if(!_kendallTauCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+	_tiledPrMatrix = 0;
+
+	/*set the variables*/
+  int signalVar, tileRowStart, tileRowEnd;
+  int tileColStart, tileColEnd;
+  ssize_t tileOffset, numElems, maxNumTilesPerPass;
+  FloatType value;
+	FloatType* __restrict__ inValues = prValues[0];	/*virtual memory address only on the host*/
+	FloatType* __restrict__ outValues = prValues[1];
+	FloatType* __restrict__ vectors = _vectors;
+	FloatType* __restrict__ hostPrValues = prValues[0];	/*this virtual memory will be phisically allocated on the host*/
+
+	fprintf(stderr, "Start transfering data\n");
+#pragma offload_transfer target(mic: _micIndex) \
+		in(vectors: length(_numVectors * _vectorSizeAligned) KT_MIC_ALLOC) \
+		nocopy(inValues: length(maxPrValuesSize) KT_MIC_ALLOC) \
+		nocopy(outValues: length(maxPrValuesSize) KT_MIC_ALLOC)
+	{
+	}
+
+	fprintf(stderr, "Start computing\n");
+	/*record system time*/
+	stime = getSysTime();
+
+	/*ranking and transform*/
+	double t1 = getSysTime();
+#pragma offload target(mic:_micIndex) nocopy(vectors: KT_MIC_REUSE)
+	{
+#pragma omp parallel
+		{
+			int row, col, rank, j;
+			int chunkSize, loRowRange, hiRowRange;
+			FloatType x, y, r, meanX, varX;
+			FloatType* __restrict__ vecX;
+			const int tid = omp_get_thread_num();
+			const int nthreads = omp_get_num_threads();
+			const FloatType avg = 1.0 / (FloatType)_vectorSize;
+			typedef CustomPair<FloatType, RankType> MyPair;
+			MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+			/*compute mean and variance*/
+			chunkSize = (_numVectors + nthreads - 1) / nthreads;
+			loRowRange = tid * chunkSize;
+			hiRowRange = min(_numVectors, (tid + 1) * chunkSize);
+
+			vecX = vectors + loRowRange * _vectorSizeAligned;
+			for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+					_vectorSizeAligned) {
+
+    		/*get the rank vector*/
+      	for(j = 0; j < _vectorSize; ++j){
+      	  ranks[j]._first = vecX[j];
+        	ranks[j]._second = j;
+      	}
+      	qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, RankType>), CustomPair<FloatType, RankType>::ascendFirst);
+	    	for(j = 0, rank = 1; j < _vectorSize - 1; ++j){
+      		vecX[ranks[j]._second] = rank;
+      		if(ranks[j]._first != ranks[j + 1]._first){
+        		rank++;
+      		}
+   		 	}
+				vecX[ranks[j]._second] = rank;
+			}
+			mm_free(ranks);
+		}
+	}
+	double t2 = getSysTime();
+	fprintf(stderr, "time for ranking and transformation: %f seconds\n", t2 - t1);
+
+	/*the first round*/
+	maxNumTilesPerPass = maxPrValuesSize / KT_PHI_TILE_SIZE;
+	indexRangeStart = 0;
+	indexRangeClose = min(numTiles, maxNumTilesPerPass);
+#pragma offload target(mic:_micIndex) \
+		nocopy(vectors: KT_MIC_REUSE)	\
+		nocopy(inValues: KT_MIC_REUSE)	\
+		in(indexRangeStart) \
+		in(indexRangeClose) \
+		signal(&signalVar)
+	{
+		/*compute*/
+		_runSingleXeonPhiCore(vectors, inValues, indexRangeStart,
+				indexRangeClose);
+	}
+	/*enter the core loop*/
+	int round = 1;
+	while (1) {
+		/*wait the completion of the previous computation and swap the buffers*/
+#pragma offload target(mic:_micIndex) \
+    nocopy(inValues: KT_MIC_REUSE) \
+    nocopy(outValues: KT_MIC_REUSE) \
+    wait(&signalVar)
+		{
+				swap(inValues, outValues);
+		}
+		swap(inValues, outValues);
+
+		/*save the finished round*/
+		fprintf(stderr, "Round %d: %ld %ld\n", round++, indexRangeStart, indexRangeClose);
+		indexRangeStartPrev = indexRangeStart;
+		indexRangeClosePrev = indexRangeClose;
+		if (indexRangeClose >= numTiles) {
+			/*already finished the computation*/
+			break;
+		}
+
+		/*compute the next range*/
+		indexRangeStart += maxNumTilesPerPass;
+		indexRangeClose = min(numTiles, maxNumTilesPerPass + indexRangeStart);
+#pragma offload target(mic:_micIndex) \
+		nocopy(vectors : KT_MIC_REUSE)	\
+		nocopy(inValues: KT_MIC_REUSE)	\
+		in(indexRangeStart)	\
+		in(indexRangeClose)	\
+		signal(&signalVar)
+		{
+			_runSingleXeonPhiCore(vectors, inValues, indexRangeStart,
+					indexRangeClose);
+		}
+
+		/*device-to-host data transfer and save*/
+		numElems = (indexRangeClosePrev - indexRangeStartPrev) * KT_PHI_TILE_SIZE;
+		if(numElems > maxPrValuesSize){
+			fprintf(stderr, "Error: %ld > %ld\n", numElems, maxPrValuesSize);
+		}
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(hostPrValues[0:numElems]) KT_MIC_REUSE)
+
+    /*save the data to the correlation matrix*/
+		tileOffset = 0;
+    for(ssize_t idx = indexRangeStartPrev; idx < indexRangeClosePrev; ++idx, tileOffset += KT_PHI_TILE_SIZE){
+      /*get the row and column index of the tile*/
+      getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+      /*compute the row range*/
+      tileRowStart *= KT_PHI_TILE_DIM;
+      tileColStart *= KT_PHI_TILE_DIM;
+      tileRowEnd = min(_numVectors, tileRowStart + KT_PHI_TILE_DIM);
+      tileColEnd = min(_numVectors, tileColStart + KT_PHI_TILE_DIM);
+
+      /*compute each tile*/
+			ssize_t rowOffset = tileOffset;
+      for(int row = tileRowStart; row < tileRowEnd; ++row, rowOffset += KT_PHI_TILE_DIM){
+        for(int col = tileColStart, colOffset = rowOffset; col < tileColEnd; ++col, ++colOffset){
+					if(row <= col){
+            _kendallTauCorr[(ssize_t)row * _numVectors + col] = hostPrValues[colOffset];
+            _kendallTauCorr[(ssize_t)col * _numVectors + row] = hostPrValues[colOffset];
+          }
+        }
+      }
+    }
+	}
+	/*transfer the remaining data*/
+	numElems = (indexRangeClosePrev - indexRangeStartPrev) * KT_PHI_TILE_SIZE;
+	if(numElems > 0) {
+		if(numElems > maxPrValuesSize){
+			fprintf(stderr, "Error: %ld > %ld\n", numElems, maxPrValuesSize);
+		}
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(hostPrValues[0:numElems]) KT_MIC_REUSE)
+    /*save the data to the correlation matrix*/
+		tileOffset = 0;
+    for(ssize_t idx = indexRangeStartPrev; idx < indexRangeClosePrev; ++idx, tileOffset += KT_PHI_TILE_SIZE){
+      /*get the row and column index of the tile*/
+      getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+      /*compute the row range*/
+      tileRowStart *= KT_PHI_TILE_DIM;
+      tileColStart *= KT_PHI_TILE_DIM;
+      tileRowEnd = min(_numVectors, tileRowStart + KT_PHI_TILE_DIM);
+      tileColEnd = min(_numVectors, tileColStart + KT_PHI_TILE_DIM);
+
+      /*compute each tile*/
+			ssize_t rowOffset = tileOffset;
+      for(int row = tileRowStart; row < tileRowEnd; ++row, rowOffset += KT_PHI_TILE_DIM){
+        for(int col = tileColStart, colOffset = rowOffset; col < tileColEnd; ++col, ++colOffset){
+					if(row <= col){
+            _kendallTauCorr[(ssize_t)row * _numVectors + col] = hostPrValues[colOffset];
+            _kendallTauCorr[(ssize_t)col * _numVectors + row] = hostPrValues[colOffset];
+          }
+        }
+      }
+    }
+	}
+
+	/*release memory on the Xeon Phi*/
+#pragma offload_transfer target(mic: _micIndex) \
+		nocopy(vectors : KT_MIC_FREE) \
+		nocopy(inValues: KT_MIC_FREE) \
+		nocopy(outValues: KT_MIC_FREE)
+
+	/*release memory on the host*/
+	for (int i = 0; i < 2; ++i) {
+		mm_free(prValues[i]);
+	}
+
+	/*recored the system time*/
+	etime = getSysTime();
+	fprintf(stderr, "Overall time: %f seconds\n", etime - stime);
+
+#if 0
+  for(int i = 0; i < _numVectors; ++i){
+    for(int j = i; j < _numVectors; ++j){
+      printf("%f ", _kendallTauCorr[i *_numVectors + j]);
+    }
+    printf("\n");
+  }
+#endif
+
+}
+
+template<typename FloatType, typename RankType>
+__attribute__((target(mic))) void KendallTau<FloatType, RankType>::_runSingleXeonPhiCore(
+		FloatType* __restrict__ vectors, FloatType* __restrict__ prValues,
+		const ssize_t indexRangeStart, const ssize_t indexRangeClose) {
+
+#ifdef __MIC__
+	const int tileDim = (_numVectors + KT_PHI_TILE_DIM -1) / KT_PHI_TILE_DIM;
+
+#if (KENDALL_TAU_KERNEL == FOUR_HARDWARE_THREADS_PER_TILE)
+
+	/*four hardware threads process one tile at a time*/
+#ifdef SOFT_BARRIER
+	/*soft barrier*/
+	_softBarrierInit(_numMICThreads / KT_PHI_TILE_DIM, KT_PHI_TILE_DIM);
+#endif	/*soft barrier*/
+
+#pragma omp parallel
+	{
+		const int numGroups = omp_get_num_threads() / KT_PHI_TILE_DIM;
+		const int tid = omp_get_thread_num() % KT_PHI_TILE_DIM;
+		const int gid = omp_get_thread_num() / KT_PHI_TILE_DIM;
+		int localSense = 0;	/*must be zero here*/
+		ssize_t offset, idx;
+		int row, col, tileRowStart, tileRowEnd, tileColStart, tileColEnd;
+		FloatType x, y, prod;
+		FloatType* __restrict__ vecX;
+		FloatType* __restrict__ vecY;
+		typedef CustomPair<RankType, RankType> MyPair;
+		MyPair* pairs = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+		MyPair* mergeBuffer = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+		/*one group processes on tile*/
+		for (idx = indexRangeStart + gid; idx < indexRangeClose; idx += numGroups) {
+
+			/*get the row and column index of the tile*/
+			getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+			/*compute row range*/
+			tileRowStart *= KT_PHI_TILE_DIM;
+			tileRowEnd = tileRowStart + KT_PHI_TILE_DIM;
+			if(tileRowEnd > _numVectors) {
+				tileRowEnd = _numVectors;
+			}
+
+			/*each work thread computes its own column index*/
+			offset = (idx - indexRangeStart) * KT_PHI_TILE_SIZE + tid;
+			col = tileColStart * KT_PHI_TILE_DIM + tid;
+			if(col < _numVectors) {
+				vecY = vectors + col * _vectorSizeAligned;
+				vecX = vectors + tileRowStart * _vectorSizeAligned;
+				for(row = tileRowStart; row < tileRowEnd; ++row, vecX += _vectorSizeAligned, offset += KT_PHI_TILE_DIM) {
+					if(row > col) {
+						continue;
+					}
+
+					/*save the data to its own buffer*/
+					prValues[offset] = _computeKTCorr(pairs, mergeBuffer, _vectorSize, vecX, vecY);
+				}
+			}
+#ifdef SOFT_BARRIER
+			_softBarrierSync(gid, KT_PHI_TILE_DIM, localSense);
+#endif	/*soft barrier*/
+		}
+		mm_free(pairs);
+		mm_free(mergeBuffer);
+	}
+
+#ifdef SOFT_BARRIER
+	_softBarrierFinalize();
+#endif	/*soft barrier*/
+
+
+/*ONE_THREAD_PER_TILE*/
+#elif (KENDALL_TAU_KERNEL == ONE_THREAD_PER_TILE)
+
+	/*each thread processes one tile at a time*/
+#pragma omp parallel
+	{
+		ssize_t offset, colOffset;
+		int row, col, tileRowStart, tileRowEnd, tileColStart, tileColEnd;
+		FloatType* __restrict__ vecX;
+		FloatType* __restrict__ vecY;
+		typedef CustomPair<RankType, RankType> MyPair;
+		MyPair* pairs = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+		MyPair* mergeBuffer = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+		/*one group processes on tile*/
+#pragma omp for schedule(static, 1)
+		for (ssize_t idx = indexRangeStart; idx < indexRangeClose; idx++) {
+
+			/*get the row and column index of the tile*/
+			getTileCoordinate(idx, tileDim, tileRowStart, tileColStart);
+
+			/*compute row range*/
+			tileRowStart *= KT_PHI_TILE_DIM;
+			tileRowEnd = tileRowStart + KT_PHI_TILE_DIM;
+			if(tileRowEnd > _numVectors) {
+				tileRowEnd = _numVectors;
+			}
+			/*compute column range*/
+      tileColStart *= KT_PHI_TILE_DIM;
+      tileColEnd = tileColStart + KT_PHI_TILE_DIM;
+      if(tileColEnd > _numVectors) {
+        tileColEnd = _numVectors;
+      }
+
+			/*compute global offset of this tile*/
+			offset = (idx - indexRangeStart) * KT_PHI_TILE_SIZE;
+
+			/*compute the tile*/
+			vecX = vectors + tileRowStart * _vectorSizeAligned;
+			for(row = tileRowStart; row < tileRowEnd; ++row, vecX += _vectorSizeAligned, offset += KT_PHI_TILE_DIM){
+				/*column*/
+				vecY = vectors + tileColStart * _vectorSizeAligned;
+				for(col = tileColStart, colOffset = 0; col < tileColEnd; ++col, vecY += _vectorSizeAligned, colOffset++){
+
+					/*compute mututal information*/
+					if(row <= col){
+						prValues[offset + colOffset] = _computeKTCorr(pairs, mergeBuffer, _vectorSize, vecX, vecY);
+					}
+				}
+			}
+		}
+		mm_free(pairs);
+		mm_free(mergeBuffer);
+	}
+
+#endif	/*KENDALL_TAU_KERNEL*/
+#endif	/*__MIC__*/
+}
+#endif	/*with phi*/
+
+
+#ifdef WITH_MPI
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::runMPICPU() {
+	double stime, etime;
+	const int tileDim = (_numVectors + KT_MPI_TILE_DIM -1) / KT_MPI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	const ssize_t numPairs = (ssize_t)(_numVectors + 1) * _numVectors / 2;	/*include self-vs-self*/
+	ssize_t numPairsProcessed = 0, totalNumPairs;
+
+#ifdef VERBOSE
+  if(_rank == 0){
+		fprintf(stderr, "execute function %s\n", __FUNCTION__);
+	}
+#endif
+
+	/*record the system time*/
+	MPI_Barrier(MPI_COMM_WORLD);
+	stime = getSysTime();
+
+	/*compute the mean and variance*/
+	int row, col;
+	int loRowRange, hiRowRange;
+	int loColRange, hiColRange;
+	int startColPerRow, endColPerRow;
+	int rowStart, rowEnd, colStart, colEnd;
+	ssize_t offset = 0, rowOffset, colOffset;
+	FloatType x, meanX, varX, prod;
+	FloatType* __restrict__ vecX;
+	FloatType* __restrict__ vecY;
+	const FloatType avg = 1.0 / (FloatType)_vectorSize;
+
+	/*allocate buffer*/
+	ssize_t chunkSize = (numTiles + _numProcs - 1) / _numProcs;
+	_kendallTauCorr = (FloatType*)mm_malloc( chunkSize * KT_MPI_TILE_DIM * KT_MPI_TILE_DIM * sizeof(FloatType), 64);
+	if(!_kendallTauCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+	_tiledPrMatrix = 1;
+
+	/*rank and transform*/
+	chunkSize = (_numVectors + _numProcs - 1) / _numProcs;
+	loRowRange = _rank * chunkSize;
+	hiRowRange = min(_numVectors, (_rank + 1) * (int) chunkSize);
+	vecX = _vectors + loRowRange * _vectorSizeAligned;
+ 	
+	CustomPair<FloatType, RankType>* ranks = (CustomPair<FloatType, RankType>*)mm_malloc(_vectorSize * sizeof(CustomPair<FloatType, RankType>), 64);
+	for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+			_vectorSizeAligned) {
+ 
+  	/*get the rank vector*/
+		int j, rank;
+   	for(j = 0; j < _vectorSize; ++j){
+   		ranks[j]._first = vecX[j];
+    	ranks[j]._second = j;
+   	}
+   	qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, RankType>), CustomPair<FloatType, RankType>::ascendFirst);
+   	for(j = 0, rank = 1; j < _vectorSize - 1; ++j){
+     	vecX[ranks[j]._second] = rank;
+    	if(ranks[j]._first != ranks[j + 1]._first){
+      	rank++;
+     	}
+    }
+   	vecX[ranks[j]._second] = rank;
+	}
+	mm_free(ranks);
+
+	/*all gather to communicate the data*/
+	int* displs = (int*)mm_malloc(_numProcs * sizeof(int), 64);
+	int* recvCounts = (int*)mm_malloc(_numProcs * sizeof(int), 64);
+	row = 0;
+	for(int i = 0; i < _numProcs; ++i) {
+		displs[i] = row * _vectorSizeAligned;
+		recvCounts[i] = min((int)chunkSize, _numVectors - row) * _vectorSizeAligned;
+		row += chunkSize;
+	}
+	const int key = loRowRange < hiRowRange ? 1 : 0;
+	MPI_Comm mycomm;
+	MPI_Comm_split(MPI_COMM_WORLD, key, _rank, &mycomm);
+	if(typeid(FloatType) == typeid(float)) {
+		if(key) {
+			MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_FLOAT, _vectors, recvCounts, displs, MPI_FLOAT, mycomm);
+		}
+	} else if(typeid(FloatType) == typeid(double)) {
+		if(key) {
+			MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DOUBLE, _vectors, recvCounts, displs, MPI_DOUBLE, mycomm);
+		}
+	} else {
+		printf("Only support floating-point values\n");
+		return;
+	}
+	mm_free(displs);
+	mm_free(recvCounts);
+	MPI_Comm_free(&mycomm);
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	/*get the tile range*/
+	chunkSize = (numTiles + _numProcs - 1) / _numProcs;
+	loRowRange = loColRange = tileDim + 1;
+	if(_rank * chunkSize < numTiles) {
+		getTileCoordinate(_rank * chunkSize, tileDim, loRowRange, loColRange);
+	}
+	hiRowRange = hiColRange = tileDim;
+	if((_rank + 1) * chunkSize <= numTiles) {
+		getTileCoordinate((_rank + 1) * chunkSize - 1, tileDim,
+				hiRowRange, hiColRange);
+	}
+	offset = 0;
+ 	typedef CustomPair<RankType, RankType> MyPair;
+ 	MyPair* pairs = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+ 	MyPair* mergeBuffer = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+	for (int tileRow = loRowRange; tileRow <= hiRowRange; tileRow++) {
+		rowStart = tileRow * KT_MPI_TILE_DIM;
+		rowEnd = min(_numVectors, rowStart + KT_MPI_TILE_DIM);
+		startColPerRow = (tileRow == loRowRange) ? loColRange : tileRow;
+		endColPerRow = (tileRow == hiRowRange) ? hiColRange : tileDim - 1;
+		for (int tileCol = startColPerRow; tileCol <= endColPerRow;
+				++tileCol) {
+			colStart = tileCol * KT_MPI_TILE_DIM;
+			colEnd = min(_numVectors, colStart + KT_MPI_TILE_DIM);
+
+			/*compute each tile*/
+			vecX = _vectors + rowStart * _vectorSizeAligned;
+			for (row = rowStart, rowOffset = offset; row < rowEnd; row++, vecX +=
+					_vectorSizeAligned, rowOffset += KT_MPI_TILE_DIM) {
+				vecY = _vectors + colStart * _vectorSizeAligned;
+				for (col = colStart, colOffset = rowOffset; col < colEnd; ++col, vecY +=
+						_vectorSizeAligned, colOffset++) {
+					if (row > col) {
+						continue;
+					}
+
+					/*statistics*/
+					numPairsProcessed++;
+
+					/*compute correlation*/
+					_kendallTauCorr[colOffset] = _computeKTCorr(pairs, mergeBuffer, _vectorSize, vecX, vecY);
+				}
+			}
+			/*move to the next tile*/
+			offset += KT_MPI_TILE_SIZE;
+		}
+	}
+	mm_free(pairs);
+	mm_free(mergeBuffer);
+
+	/*compute the total number of edges*/
+	MPI_Reduce(&numPairsProcessed, &totalNumPairs, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+
+	/*recored the system time*/
+	etime = getSysTime();
+	if (_rank == 0) {
+		fprintf(stderr, "Overall time (%ld pairs): %f seconds\n", totalNumPairs, etime - stime);
+	}
+}
+
+#ifdef WITH_PHI
+template<typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::runMPIXeonPhi() {
+	const int tileDim = (_numVectors + KT_PHI_TILE_DIM - 1) / KT_PHI_TILE_DIM;
+	const ssize_t numTiles = (ssize_t)(tileDim + 1) * tileDim / 2;
+	ssize_t indexRangeStart, indexRangeClose, indexRangeEnd;
+	ssize_t indexRangeStartPrev, indexRangeClosePrev;
+	double stime, etime;
+	FloatType* prValues[2];
+
+#ifdef VERBOSE
+  if(_rank == 0){
+		fprintf(stderr, "execute function %s\n", __FUNCTION__);
+	}
+#endif
+
+	/*set the number of threads on the Xeon Phi*/
+#pragma offload target(mic:_micIndex) inout(_numMICThreads)
+	{
+#if KENDALL_TAU_KERNEL == ONE_THREAD_PER_TILE
+		if(_numMICThreads < 1){
+			_numMICThreads = omp_get_num_procs();
+		}
+#else
+		/*set the number of threads*/
+		if(_numMICThreads < KT_PHI_TILE_DIM) {
+			_numMICThreads = omp_get_num_procs();
+		}
+		_numMICThreads = _numMICThreads / KT_PHI_TILE_DIM * KT_PHI_TILE_DIM;
+#endif
+		omp_set_num_threads(_numMICThreads);
+	}
+
+	/*allocate memory*/
+	ssize_t maxPrValuesSize = KT_PHI_BUFFER_SIZE / sizeof(FloatType); /*a total of 512 MB*/
+	ssize_t alignment = _numMICThreads * KT_PHI_TILE_SIZE;
+	maxPrValuesSize = (maxPrValuesSize + alignment - 1) / alignment * alignment;
+	for (int i = 0; i < 2; ++i) {
+		prValues[i] = (FloatType*) mm_malloc(maxPrValuesSize * sizeof(FloatType), 64);
+		if (!prValues[i]) {
+			fprintf(stderr, "Memory allocation failed at line %d in file %s\n",
+					__LINE__, __FILE__);
+			exit(-1);
+		}
+	}
+	const ssize_t chunkSize = (numTiles + _numProcs - 1) / _numProcs;
+	_kendallTauCorr = (FloatType*)mm_malloc( chunkSize * KT_PHI_TILE_SIZE * sizeof(FloatType), 64);
+	if(!_kendallTauCorr) {
+		fprintf(stderr, "Memory allocation failed\n");
+		exit(-1);
+	}
+	_tiledPrMatrix = 1;
+
+	/*set the variables*/
+	int signalVar;
+	ssize_t offset = 0, numElems, maxNumTilesPerPass;
+	FloatType* __restrict__ inValues = prValues[0];
+	FloatType* __restrict__ outValues = prValues[1];
+	FloatType* __restrict__ vectors = _vectors;
+
+	/*transfer data*/
+	if(_rank == 0) {
+		fprintf(stderr, "Start transfering data\n");
+	}
+#pragma offload_transfer target(mic: _micIndex) \
+	in(vectors: length(_numVectors * _vectorSizeAligned) KT_MIC_ALLOC) \
+	nocopy(inValues: length(maxPrValuesSize) KT_MIC_ALLOC) \
+	nocopy(outValues: length(maxPrValuesSize) KT_MIC_ALLOC)
+
+	/*record system time*/
+	if(_rank == 0) {
+		fprintf(stderr, "Start computing\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
+	stime = getSysTime();
+
+	/*rank and transform*/
+	double t1 = getSysTime();
+#pragma offload target(mic:_micIndex) nocopy(vectors: KT_MIC_REUSE)
+	{
+#pragma omp parallel
+		{
+			int row, col, rank, j;
+			int chunkSize, loRowRange, hiRowRange;
+			FloatType x, y, r, meanX, varX;
+			FloatType* __restrict__ vecX;
+			const int tid = omp_get_thread_num();
+			const int nthreads = omp_get_num_threads();
+			const FloatType avg = 1.0 / (FloatType)_vectorSize;
+			typedef CustomPair<FloatType, RankType> MyPair;
+			MyPair* ranks = (MyPair*)mm_malloc(_vectorSize * sizeof(MyPair), 64);
+
+			/*compute mean and variance*/
+			chunkSize = (_numVectors + nthreads - 1) / nthreads;
+			loRowRange = tid * chunkSize;
+			hiRowRange = (tid + 1) * chunkSize;
+			if(hiRowRange > _numVectors) {
+				hiRowRange = _numVectors;
+			}
+
+			vecX = vectors + loRowRange * _vectorSizeAligned;
+			for (row = loRowRange; row < hiRowRange; ++row, vecX +=
+					_vectorSizeAligned) {
+        /*get the rank vector*/
+        for(j = 0; j < _vectorSize; ++j){
+          ranks[j]._first = vecX[j];
+          ranks[j]._second = j;
+        }
+        qsort(ranks, _vectorSize, sizeof(CustomPair<FloatType, RankType>), CustomPair<FloatType, RankType>::ascendFirst);
+ 		   	for(j = 0, rank = 1; j < _vectorSize - 1; ++j){
+    			vecX[ranks[j]._second] = rank;
+      		if(ranks[j]._first != ranks[j + 1]._first){
+        		rank++;
+      		}
+    		}
+				vecX[ranks[j]._second] = rank;
+			}
+			mm_free(ranks);
+		}
+	}
+	double t2 = getSysTime();
+	fprintf(stderr, "time for ranking and transformation: %f seconds\n", t2 - t1);
+
+	/*the first round*/
+	maxNumTilesPerPass = maxPrValuesSize / KT_PHI_TILE_SIZE;
+	indexRangeStart = min(numTiles, _rank * chunkSize);
+	indexRangeEnd = min(numTiles, (_rank + 1) * chunkSize);
+	indexRangeClose = min(indexRangeEnd, indexRangeStart + maxNumTilesPerPass);
+	/*fprintf(stderr, "indexRangeStrat: %ld indexRangeEnd: %ld indexRangeClose: %ld\n",
+				indexRangeStart, indexRangeEnd, indexRangeClose);*/
+#pragma offload target(mic:_micIndex) \
+	nocopy(vectors: KT_MIC_REUSE)	\
+	nocopy(inValues: KT_MIC_REUSE)	\
+	in(indexRangeStart) \
+	in(indexRangeClose) \
+	signal(&signalVar)
+	{
+		/*compute*/
+		_runSingleXeonPhiCore(vectors, inValues, indexRangeStart, indexRangeClose);
+	}
+	//fprintf(stderr, "first round finished\n");
+
+	/*enter the core loop*/
+	int round = 1;
+	while (1) {
+		/*wait the completion of the previous computation*/
+#pragma offload target(mic:_micIndex) \
+    nocopy(inValues: KT_MIC_REUSE) \
+    nocopy(outValues: KT_MIC_REUSE) \
+    wait(&signalVar)
+		{
+      FloatType* tmp = inValues;
+      inValues = outValues;
+      outValues = tmp;
+		}
+  	swap(inValues, outValues);
+
+		/*statistics*/
+		//fprintf(stderr, "Round %d: (proc %d) %ld %ld\n", round++, _rank, indexRangeStart, indexRangeClose);
+		indexRangeStartPrev = indexRangeStart;
+		indexRangeClosePrev = indexRangeClose;
+		if (indexRangeClose >= indexRangeEnd) {
+			break;
+		}
+
+		/*initiate another computing kernel?*/
+		indexRangeStart += maxNumTilesPerPass;
+		indexRangeClose = min(indexRangeEnd, indexRangeStart + maxNumTilesPerPass);
+#pragma offload target(mic:_micIndex) \
+	nocopy(vectors : KT_MIC_REUSE)	\
+	nocopy(inValues: KT_MIC_REUSE)	\
+	in(indexRangeStart)	\
+	in(indexRangeClose)	\
+	signal(&signalVar)
+		{
+			_runSingleXeonPhiCore(vectors, inValues, indexRangeStart, indexRangeClose);
+		}
+		numElems = (indexRangeClosePrev - indexRangeStartPrev) * KT_PHI_TILE_SIZE;
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(_kendallTauCorr[offset:numElems]) KT_MIC_REUSE)
+		offset += numElems;
+	}
+	/*process the data in the last round*/
+	numElems = (indexRangeClosePrev - indexRangeStartPrev) * KT_PHI_TILE_SIZE;
+	if(numElems > 0) {
+#pragma offload_transfer target(mic:_micIndex) out(outValues[0:numElems]:into(_kendallTauCorr[offset:numElems]) KT_MIC_REUSE)
+	}
+
+	/*recored the system time*/
+	MPI_Barrier(MPI_COMM_WORLD);
+	etime = getSysTime();
+	if(_rank == 0) {
+		fprintf(stderr, "Overall time: %f seconds\n", etime - stime);
+	}
+
+	/*release memory on the Xeon Phi*/
+#pragma offload_transfer target(mic: _micIndex) \
+	nocopy(vectors : KT_MIC_FREE) \
+	nocopy(inValues: KT_MIC_FREE) \
+	nocopy(outValues: KT_MIC_FREE)
+
+	/*release memory on the host*/
+	for (int i = 0; i < 2; ++i) {
+		mm_free(prValues[i]);
+	}
+
+}
+#endif	/*with phi*/
+#endif	/*with mpi*/
+
+template <typename FloatType, typename RankType>
+void KendallTau<FloatType, RankType>::transpose()
+{
+	int newNumVectors = _vectorSize;
+	int newVectorSize = _numVectors;
+	int alignmentFactor = 64 / sizeof(FloatType);
+	int newVectorSizeAligned = (newVectorSize + alignmentFactor - 1) / alignmentFactor * alignmentFactor;
+	FloatType *newVectors, *invectors, tmp;
+
+	/*allocate new memory*/
+	newVectors = (FloatType*)mm_malloc(newNumVectors * newVectorSizeAligned * sizeof(FloatType), 64);
+#if 0
+	fprintf(stderr, "Before transpose:\n");
+	for(int row = 0; row < _numVectors; ++row){
+		invectors = _vectors + row * _vectorSizeAligned;
+		for(int col = 0; col < _vectorSize; ++col){
+			tmp = *(invectors + col);
+			fprintf(stderr, "%f ", tmp);
+		}
+		fprintf(stderr, "\n");
+	}
+#endif
+	
+	/*transpose the matrix*/
+	for(int row = 0; row < _numVectors; ++row){
+		invectors = _vectors + row * _vectorSizeAligned;
+		for(int col = 0; col < _vectorSize; ++col){
+			tmp = *(invectors + col);
+			*(newVectors + col * newVectorSizeAligned + row) = tmp;
+		}
+	}
+	mm_free(_vectors);
+	_numVectors = newNumVectors;
+	_vectorSize = newVectorSize;
+	_vectorSizeAligned = newVectorSizeAligned;
+	_vectors = newVectors;
+
+#if 0
+	fprintf(stderr, "After transposing:\n");
+   for(int row = 0; row < _numVectors; ++row){
+     invectors = _vectors + row * _vectorSizeAligned;
+     for(int col = 0; col < _vectorSize; ++col){
+       tmp = *(invectors + col);
+       fprintf(stderr, "%f ", tmp);
+     }
+     fprintf(stderr, "\n");
+   }
+#endif
+}
+#endif /* PEARSONR_HPP_ */

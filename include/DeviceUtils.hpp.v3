@@ -1,0 +1,1351 @@
+ /* 
+ *	DeviceUtils.hpp
+ *
+ *  Author: Liu, Yongchao
+ *  Affiliation: School of Computational Science & Engineering
+ *  						Georgia Institute of Technology, Atlanta, GA 30332
+ *  URL: www.liuyc.org
+ */
+
+#ifndef __DEVICE_UTILS_HPP
+#define __DEVICE_UTILS_HPP
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <immintrin.h>
+
+/*enable SIMD vectorized merge sort*/
+#define SIMD_AVX512			/*use SIMD vectorized merge procedure.*/
+#define SIMD_AVX512_LEFTOVER	/*the remaing part using SIMD*/
+#define INSERTION_SORT	/*to use insertion sort to sort the small elements*/
+
+template <typename T1, typename T2>
+struct CustomPair
+{
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+	CustomPair()
+	{
+	}
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+	CustomPair(const T1 first, const T2 second)
+	{
+		_first = first;
+		_second = second;
+	}
+
+	T1 _first;
+	T2 _second;
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeSort(CustomPair<T1, T2>* data, const int numElems)
+	{
+		int mid, right;
+		ssize_t numDiscordantPairs = 0;
+
+		/*merge sort*/
+		for(int stride = 1; stride <= numElems; stride *= 2){
+			
+			/*per-level computation*/
+			for(int left = 0; left < numElems; left += 2 * stride){
+				mid = left + stride;
+				if(mid > numElems){
+					mid = numElems;
+				}
+				right = left + 2 * stride;
+				if(right > numElems){
+					right = numElems;
+				}
+				//printf("left: %d mid: %d right: %d stride: %d\n", left, mid, right, stride);
+				
+				/*merge the two parts*/
+				numDiscordantPairs += knightMergeInPlace(data, left, mid, right);
+			}
+		}
+#if 0
+		printf("sorted results:\n");
+		for(int i = 0; i < numElems; ++i){
+			printf("%d ", data[i]._second);
+			if(i && i %32 == 0){
+				printf("\n");
+			}
+		}
+		printf("#discordant pairs: %ld\n", numDiscordantPairs);
+#endif
+
+		return numDiscordantPairs;
+	}
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeInPlace(CustomPair<T1, T2>* data, const int left, int mid, const int right){
+		int l, r;
+		ssize_t numDiscordantPairs = 0;
+		CustomPair<T1, T2> tmp;
+
+		/*merge the two segments in place*/
+		l = left;
+		r = mid;
+		while(l < mid && r < right){
+			if(data[r]._second < data[l]._second){
+				/*count the number of discordant pairs*/
+				numDiscordantPairs += mid - l;
+
+				/*shift the elements in [l, r) to the right by one element*/
+				tmp = data[r];
+				memmove(data + l + 1, data + l, (r - l) * sizeof(CustomPair<T1, T2>));
+				data[l] = tmp;
+				/*adjust l and mid*/
+				l++;
+				mid++;
+
+				/*advance the right pointer*/
+				r++;
+			}else{ /*advance the left pointer*/
+				l++;
+			}
+		}
+		return numDiscordantPairs;
+	}
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeSort(CustomPair<T1, T2>* data, CustomPair<T1, T2>* mergeBuffer, const int numElems)
+	{
+		int mid, right;
+		ssize_t numDiscordantPairs = 0;
+		CustomPair<T1, T2> *input = data;
+		CustomPair<T1, T2> *output = mergeBuffer;
+
+		/*merge sort*/
+		for(int stride = 1; stride <= numElems; stride *= 2){
+			
+			/*per-level computation*/
+			for(int left = 0; left < numElems; left += 2 * stride){
+				mid = left + stride;
+				if(mid > numElems){
+					mid = numElems;
+				}
+				right = left + 2 * stride;
+				if(right > numElems){
+					right = numElems;
+				}
+				//printf("left: %d mid: %d right: %d stride: %d\n", left, mid, right, stride);
+				
+				/*merge the two parts*/
+				numDiscordantPairs += knightMergeOutPlace(input, output, left, mid, right);
+			}
+
+			/*swap the buffer pointers*/
+			CustomPair<T1, T2>* tmp = input;
+			input = output;
+			output = tmp;
+		}
+		if(data != input){
+			/*copy to the original input array*/
+			memcpy(data, input, numElems * sizeof(*data));
+		}
+
+#if 0
+		printf("sorted results:\n");
+		for(int i = 0; i < numElems; ++i){
+			printf("%d ", data[i]._second);
+			if(i && i %32 == 0){
+				printf("\n");
+			}
+		}
+		printf("#discordant pairs: %ld\n", numDiscordantPairs);
+#endif
+
+		return numDiscordantPairs;
+	}
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeOutPlace(CustomPair<T1, T2>* input, CustomPair<T1, T2>*output, int left, int mid, int right){
+		int l, r, p = left;
+		ssize_t numDiscordantPairs = 0;
+
+		/*merge the two segments in place*/
+		l = left;
+		r = mid;
+		while(l < mid && r < right){
+			if(input[r]._second < input[l]._second){
+
+				/*count the number of discordant pairs*/
+				numDiscordantPairs += mid - l;
+
+				/*save the element from the right segment to temp array*/
+				output[p++] = input[r++];
+			}else{
+
+				/*save the element from the left segment to temp array*/
+				output[p++] = input[l++];
+			}
+		}
+		if(l < mid){
+			memcpy(output + p, input + l, (mid - l) * sizeof(*output));
+		}else if(r < right){
+			memcpy(output + p, input + r, (right - r) * sizeof(*output));
+		}
+	
+		return numDiscordantPairs;
+	}
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static int ascendFirst(const void* a, const void* b)
+	{
+		CustomPair<T1, T2>* pa = (CustomPair<T1, T2>*)a;
+		CustomPair<T1, T2>* pb = (CustomPair<T1, T2>*)b;
+	
+		if(pa->_first < pb->_first) return -1;
+		if(pa->_first > pb->_first) return 1;
+
+		return 0;
+	}
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static int ascendPair(const void* a, const void* b){
+		CustomPair<T1, T2>* pa = (CustomPair<T1, T2>*)a;
+		CustomPair<T1, T2>* pb = (CustomPair<T1, T2>*)b;
+
+		/*first element*/
+		if(pa->_first < pb->_first) return -1;
+    if(pa->_first > pb->_first) return 1;
+		
+		/*second element*/
+		if(pa->_second < pb->_second) return -1;
+		if(pa->_second > pb->_second) return 1;
+		
+		return 0;
+	}
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static void countNumTiesFirstPair(CustomPair<T1, T2>* data, const int numElems, ssize_t& numTiesX, ssize_t& numTiesXY)
+	{
+		bool cond, cond2;
+		int i, startX, startXY;
+		ssize_t n;
+
+		startX = startXY = -1;
+		numTiesX = numTiesXY = 0;
+		for(i = 0; i < numElems - 1; ++i){
+			cond = data[i]._first != data[i + 1]._first;
+			cond2 = data[i]._second != data[i + 1]._second;
+
+			/*count the number of ties in X*/
+			if(cond){
+				n = i - startX;
+				if(n > 1){
+					numTiesX += n * (n - 1) / 2;
+				}
+				startX = i;
+			}
+
+			/*count the number of joint ties in X and Y*/
+			if(cond || cond2){
+				n = i - startXY;
+				if(n > 1){
+					numTiesXY += n * (n - 1) / 2;
+				}
+				startXY = i;
+			}
+		}
+		n = i - startX;
+		if(n > 1){
+			numTiesX += n * (n - 1) / 2;
+		}
+		n = i - startXY;
+		if(n > 1){
+			numTiesXY += n * (n - 1) / 2;
+		}
+	}
+
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static ssize_t countNumTiesSecond(CustomPair<T1, T2>* data, int numElems)
+  {
+    int n, i, start;
+    ssize_t numTies = 0;
+
+    for(i = 0, start = -1; i < numElems - 1; ++i){
+      if(data[i]._second != data[i + 1]._second){
+        n = i - start;
+        if(n > 1){
+          numTies += n * (n - 1) / 2;
+        }
+        /*re-set start*/
+        start = i;
+      }
+    }
+    n = i - start;
+    if(n > 1){
+      numTies += n * (n - 1) / 2;
+    }
+		
+		return numTies;
+  }
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static ssize_t countNumTiesPair(CustomPair<T1, T2>* data, int numElems)
+  {
+    int n, i, start;
+    ssize_t numTies = 0;
+
+    for(i = 0, start = -1; i < numElems - 1; ++i){
+      if(data[i]._first != data[i + 1]._first || data[i]._second != data[i + 1]._second){
+        n = i - start;
+        if(n > 1){
+          numTies += n * (n - 1) / 2;
+        }
+        /*re-set start*/
+        start = i;
+      }
+    }
+    n = i - start;
+    if(n > 1){
+      numTies += n * (n - 1) / 2;
+    }
+
+    return numTies;
+  }
+};
+
+template <typename T>
+struct Window
+{
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	Window()
+	{
+		_x1 = 1;
+		_y1 = 1;
+		_x2 = 0;
+		_y2 = 0;
+		_npts = 0;
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	Window(const T x1, const T y1, const T x2, const T y2, const T npts = 0)
+	{
+		_x1 = x1;
+		_y1 = y1;
+		_x2 = x2;
+		_y2 = y2;
+		_npts = npts;
+	}
+
+#ifdef WITH_PHI
+	__attribute__((target(mic)))
+#endif
+	void set(const T x1, const T y1, const T x2, const T y2, const T npts = 0)
+	{
+		_x1 = x1;
+    _y1 = y1;
+    _x2 = x2;
+    _y2 = y2;
+		_npts = npts;
+	}
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	bool isInvalid()
+	{
+		return _x1 > _x2 || _y1 > _y2;
+	}
+
+#ifdef WITH_PHI
+  __attribute__((target(mic)))
+#endif
+	void print()
+	{
+		printf("%d %d %d %d %d\n", _x1, _y1, _x2, _y2, _npts);
+	}
+
+	T _x1;	/*lefttop x*/
+	T _y1;	/*lefttop y*/
+	T _x2;	/*rightbottom x*/
+	T _y2;	/*rightbottom y*/
+	T _npts;	/*number of points in this region*/
+};
+
+class PackedInt
+{
+public:
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static int ascendFirst(const void* a, const void* b)
+  {
+   	uint32_t afirst = *((uint32_t*)a)>> 16;
+   	uint32_t bfirst = *((uint32_t*)b) >> 16;
+
+    if(afirst < bfirst) return -1;
+    if(afirst > bfirst) return 1;
+
+    return 0;
+  }
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static int ascendPair(const void* a, const void* b)
+  {
+    uint32_t aval = *((uint32_t*)a);
+    uint32_t bval = *((uint32_t*)b);
+
+    if(aval < bval) return -1;
+    if(aval > bval) return 1;
+
+    return 0;
+  }
+#ifdef WITH_PHI
+__attribute__((target(mic)))
+#endif
+  static inline double getSysTime() {
+    double dtime;
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+
+    dtime = (double) tv.tv_sec;
+    dtime += (double) (tv.tv_usec) / 1000000.0;
+
+    return dtime;
+  }
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static void mergeSort(uint32_t* data, uint32_t* mergeBuffer, const int numElems)
+	{
+		int mid, right, stride;
+		uint32_t*input = data;
+		uint32_t *output = mergeBuffer;
+		double stime, etime;
+
+		/*merge sort*/
+		//stime = getSysTime();
+		#if defined(INSERTION_SORT)
+		for(stride = 8; stride > numElems; stride /= 2);
+		for(; stride <= numElems; stride *= 2){
+		#else
+		for(stride = 1; stride <= numElems; stride *= 2){
+		#endif
+			
+			/*per-level computation*/
+			for(int left = 0; left < numElems; left += 2 * stride){
+				mid = left + stride;
+				if(mid > numElems){
+					mid = numElems;
+				}
+				right = left + 2 * stride;
+				if(right > numElems){
+					right = numElems;
+				}
+				/*merge the two parts*/
+				mergeOutPlace(input, output, left, mid, right);
+			}
+
+			/*swap the buffer pointers*/
+			uint32_t* tmp = input;
+			input = output;
+			output = tmp;
+		}
+		if(data != input){
+			/*copy to the original input array*/
+			memcpy(data, input, numElems * sizeof(*data));
+		}
+		//etime = getSysTime();
+		//printf("Merge sort time: %f seconds\n", etime - stime);
+#if 0
+    printf("sorted results:\n");
+    for(int i = 0; i < numElems; ++i){
+      printf("%d ", data[i]);
+      if(i && i %32 == 0){
+        printf("\n");
+      }
+    }
+		printf("\n");
+#endif
+#if 0
+		for(int i = 1; i < numElems; ++i){
+			if(data[i] <= data[i - 1]){
+				printf("inconsistent order: (%d < %d)\n", data[i], data[i-1]);
+				break;
+			}
+		}
+#endif
+
+	}
+
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static void mergeOutPlace(uint32_t* input, uint32_t*output, int left, int mid, int right){
+		int l, r, p = left;
+
+#if defined(__MIC__) && defined(SIMD_AVX512)
+		int nbits, leadL, leadR, lead;
+		const __m512i vecIndexInc = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+		const __m512i vecReverse = _mm512_set_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+		const __m512i vecMaxInt = _mm512_set1_epi32(0x7fffffff);
+		const __m512i vecMid = _mm512_set1_epi32(mid);
+		const __m512i vecRight = _mm512_set1_epi32(right);
+		const __m512i vecPermuteIndex16 = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13 ,12, 11, 10, 9, 8);
+		const __m512i vecPermuteIndex8 = _mm512_set_epi32(11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4);
+	 	const __m512i vecPermuteIndex4 = _mm512_set_epi32(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
+   	const __m512i vecPermuteIndex2 = _mm512_set_epi32(14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
+		__m512i vecC, vecD, vecOL, vecOH;
+		__m512i vecL1, vecH1, vecL2, vecH2, vecL3, vecH3, vecL4, vecH4;
+		__mmask16 vecMaskOL, vecMaskOH;
+
+		/*for short segments*/
+		if(mid - left < 16 || right - mid < 16){
+#if defined(INSERTION_SORT)
+      /*use insertion sort*/
+      uint32_t curr;
+      for(l = left + 1; l < right; ++l){
+        curr = input[l]; r = l;
+        while(r > left && input[r - 1] > curr){
+          input[r] = input[r - 1];
+          r--;
+        }
+        input[r] = curr;
+      }
+			/*copy the rest*/
+      memcpy(output + left, input + left, (right - left) * sizeof(uint32_t));
+#else
+ 	   	l = left; r = mid;
+  	  while(l < mid && r < right){
+      	if(input[r] < input[l]){
+
+  	      /*save the element from the right segment to temp array*/
+    	    output[p++] = input[r++];
+     	 	}else{
+
+        	/*save the element from the left segment to temp array*/
+        	output[p++] = input[l++];
+      	}
+    	}
+    	/*copy the remaining to the output buffer*/
+    	if(l < mid){
+      	memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+    	}else if(r < right){
+      	memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+    	}
+#endif
+			/*return*/
+			return;
+		}
+	
+		/*use simd vectorization*/
+		l = left; r = mid;
+		vecOL = _mm512_load_epi32(input + l);
+		vecOH = _mm512_load_epi32(input + r);
+		l += 16; r += 16;
+
+		/*enter the core loop*/	
+		do{
+			/*prefetch input[l] and input[r]*/
+			//#pragma prefetch input
+
+			if(_mm512_reduce_min_epi32(vecOL) >= _mm512_reduce_max_epi32(vecOH)){
+				_mm512_store_epi32(output + p, vecOH);
+				p += 16;
+				vecOH = vecOL;
+			}else if(_mm512_reduce_min_epi32(vecOH) >= _mm512_reduce_max_epi32(vecOL)){
+				_mm512_store_epi32(output + p, vecOL);
+				p += 16;
+			}else{
+				/*in-register bitonic merge network*/
+				vecOH = _mm512_permutevar_epi32(vecReverse, vecOH);	/*reverse B*/
+
+				/*Level 1*/
+				vecL1 = _mm512_min_epi32(vecOL, vecOH);
+				vecH1 = _mm512_max_epi32(vecOL, vecOH);
+				//printVector(vecL1, __LINE__);
+				//printVector(vecH1, __LINE__);
+
+				/*Level 2*/
+				vecC = _mm512_permutevar_epi32(vecPermuteIndex16, vecL1);
+				vecD = _mm512_permutevar_epi32(vecPermuteIndex16, vecH1);
+				vecL2 = _mm512_mask_min_epi32(vecL2, 0x00ff, vecC, vecL1);
+				vecH2 = _mm512_mask_min_epi32(vecH2, 0x00ff, vecD, vecH1);
+				vecL2 = _mm512_mask_max_epi32(vecL2, 0xff00, vecC, vecL1);
+				vecH2 = _mm512_mask_max_epi32(vecH2, 0xff00, vecD, vecH1);
+				//printVector(vecL2, __LINE__);
+				//printVector(vecH2, __LINE__);
+
+				/*Level 3*/
+				vecC = _mm512_permutevar_epi32(vecPermuteIndex8, vecL2);
+				vecD = _mm512_permutevar_epi32(vecPermuteIndex8, vecH2);
+      	vecL3 = _mm512_mask_min_epi32(vecL3, 0x0f0f, vecC, vecL2);
+      	vecH3 = _mm512_mask_min_epi32(vecH3, 0x0f0f, vecD, vecH2);
+      	vecL3 = _mm512_mask_max_epi32(vecL3, 0xf0f0, vecC, vecL2);
+      	vecH3 = _mm512_mask_max_epi32(vecH3, 0xf0f0, vecD, vecH2);
+     		//printVector(vecL3, __LINE__);
+     		//printVector(vecH3, __LINE__);
+
+				/*Level 4*/
+      	vecC = _mm512_permutevar_epi32(vecPermuteIndex4, vecL3);
+      	vecD = _mm512_permutevar_epi32(vecPermuteIndex4, vecH3);
+      	vecL4 = _mm512_mask_min_epi32(vecL4, 0x3333, vecC, vecL3);
+      	vecH4 = _mm512_mask_min_epi32(vecH4, 0x3333, vecD, vecH3);
+      	vecL4 = _mm512_mask_max_epi32(vecL4, 0xcccc, vecC, vecL3);
+      	vecH4 = _mm512_mask_max_epi32(vecH4, 0xcccc, vecD, vecH3);
+     		//printVector(vecL4, __LINE__);
+     		//printVector(vecH4, __LINE__);
+
+				/*Level 5*/
+      	vecC = _mm512_permutevar_epi32(vecPermuteIndex2, vecL4);
+      	vecD = _mm512_permutevar_epi32(vecPermuteIndex2, vecH4);
+      	vecOL = _mm512_mask_min_epi32(vecOL, 0x5555, vecC, vecL4);
+      	vecOH = _mm512_mask_min_epi32(vecOH, 0x5555, vecD, vecH4);
+      	vecOL = _mm512_mask_max_epi32(vecOL, 0xaaaa, vecC, vecL4);
+      	vecOH = _mm512_mask_max_epi32(vecOH, 0xaaaa, vecD, vecH4);
+				//printVector(vecOL, __LINE__);
+				//printVector(vecOH, __LINE__);
+
+				/*save vecL to the output vector: always memory aligned*/
+				_mm512_store_epi32(output + p, vecOL);
+				p += 16;
+			}
+			
+			/*condition check*/
+			if(l + 16 >= mid || r + 16 >= right){
+				break;
+			}
+	
+			/*determine which segment to use*/
+			leadL = input[l];
+			leadR = input[r];
+			lead = _mm512_reduce_max_epi32(vecOH);
+			if(lead <= leadL && lead <= leadR){
+				_mm512_store_epi32(output + p, vecOH);
+				vecOL = _mm512_load_epi32(input + l);
+				vecOH = _mm512_load_epi32(input + r);
+				p += 16;
+				l += 16;
+				r += 16;
+			}else if(leadR < leadL){
+				vecOL = _mm512_load_epi32(input + r);
+				r += 16;
+			}else{
+				vecOL = _mm512_load_epi32(input + l);
+				l += 16;
+			}
+		}while(1);
+
+#if defined(SIMD_AVX512_LEFTOVER)
+		/*process the remaining*/
+		vecMaskOH = 0x0ffff;	/*guaranteed*/
+		while(l < mid || r < right){
+
+			/*load a new segment of data*/
+			if(l < mid && r < right){
+				/*determine which segment to use*/
+				if(input[r] < input[l]){
+					vecC = _mm512_add_epi32(_mm512_set1_epi32(r), vecIndexInc);
+					vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecRight);
+					vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + r);
+					r += 16;
+				}else{
+					vecC = _mm512_add_epi32(_mm512_set1_epi32(l), vecIndexInc);
+					vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecMid);
+					vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + l);
+					l += 16;
+				}
+			}else if(l < mid){
+				vecC = _mm512_add_epi32(_mm512_set1_epi32(l), vecIndexInc);
+				vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecMid);
+				vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + l);
+			
+				/*no need to continue comparison*/
+				if(_mm512_mask_reduce_max_epi32(vecMaskOH, vecOH) <= _mm512_reduce_min_epi32(vecOL)){
+					break;
+				}
+				l += 16;
+			}else if(r < right){
+      	vecC = _mm512_add_epi32(_mm512_set1_epi32(r), vecIndexInc);
+      	vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecRight);
+       	vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + r);
+
+				/*no need to continue comparison*/
+				if(_mm512_mask_reduce_max_epi32(vecMaskOH, vecOH) <= _mm512_reduce_min_epi32(vecOL)){
+					break;
+				}
+				r += 16;
+			}
+
+			/*prefetch input[l] and input[r]*/
+			//#pragma prefetch input
+
+			/*in-register bitonic merge network*/
+			vecOH = _mm512_permutevar_epi32(vecReverse, vecOH);	/*reverse B*/
+
+			/*Level 1*/
+			vecL1 = _mm512_min_epi32(vecOL, vecOH);
+			vecH1 = _mm512_max_epi32(vecOL, vecOH);
+			//printVector(vecL1, __LINE__);
+			//printVector(vecH1, __LINE__);
+
+			/*Level 2*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex16, vecL1);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex16, vecH1);
+			vecL2 = _mm512_mask_min_epi32(vecL2, 0x00ff, vecC, vecL1);
+			vecH2 = _mm512_mask_min_epi32(vecH2, 0x00ff, vecD, vecH1);
+			vecL2 = _mm512_mask_max_epi32(vecL2, 0xff00, vecC, vecL1);
+			vecH2 = _mm512_mask_max_epi32(vecH2, 0xff00, vecD, vecH1);
+			//printVector(vecL2, __LINE__);
+			//printVector(vecH2, __LINE__);
+
+			/*Level 3*/
+			vecC = _mm512_permutevar_epi32(vecPermuteIndex8, vecL2);
+			vecD = _mm512_permutevar_epi32(vecPermuteIndex8, vecH2);
+      vecL3 = _mm512_mask_min_epi32(vecL3, 0x0f0f, vecC, vecL2);
+      vecH3 = _mm512_mask_min_epi32(vecH3, 0x0f0f, vecD, vecH2);
+      vecL3 = _mm512_mask_max_epi32(vecL3, 0xf0f0, vecC, vecL2);
+      vecH3 = _mm512_mask_max_epi32(vecH3, 0xf0f0, vecD, vecH2);
+     	//printVector(vecL3, __LINE__);
+     	//printVector(vecH3, __LINE__);
+
+			/*Level 4*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex4, vecL3);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex4, vecH3);
+      vecL4 = _mm512_mask_min_epi32(vecL4, 0x3333, vecC, vecL3);
+      vecH4 = _mm512_mask_min_epi32(vecH4, 0x3333, vecD, vecH3);
+      vecL4 = _mm512_mask_max_epi32(vecL4, 0xcccc, vecC, vecL3);
+      vecH4 = _mm512_mask_max_epi32(vecH4, 0xcccc, vecD, vecH3);
+     	//printVector(vecL4, __LINE__);
+     	//printVector(vecH4, __LINE__);
+
+			/*Level 5*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex2, vecL4);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex2, vecH4);
+      vecOL = _mm512_mask_min_epi32(vecOL, 0x5555, vecC, vecL4);
+      vecOH = _mm512_mask_min_epi32(vecOH, 0x5555, vecD, vecH4);
+      vecOL = _mm512_mask_max_epi32(vecOL, 0xaaaa, vecC, vecL4);
+      vecOH = _mm512_mask_max_epi32(vecOH, 0xaaaa, vecD, vecH4);
+			//printVector(vecOL, __LINE__);
+			//printVector(vecOH, __LINE__);
+
+			/*save vecL to the output vector*/
+			nbits = _mm_countbits_32(vecMaskOL) + _mm_countbits_32(vecMaskOH);
+			vecMaskOL = nbits > 15 ? 0x0ffff : (1 << nbits) - 1;
+			vecMaskOH = nbits < 17 ? 0 : (1 << (nbits - 16)) - 1;
+			_mm512_mask_store_epi32(output + p, vecMaskOL, vecOL);
+			p += _mm_countbits_32(vecMaskOL);
+		}
+		
+		/*process the last segment and not guaranteed to be memory aligned*/
+		_mm512_mask_packstorelo_epi32(output + p, vecMaskOH, vecOH);
+		_mm512_mask_packstorehi_epi32(output + p + 16, vecMaskOH, vecOH);
+		p += _mm_countbits_32(vecMaskOH);
+#else
+		/*use non-vectorized code to process the leftover*/
+    if(l < mid && r < right){
+      if(input[r] < input[l]){
+        /*write vecOH to the left segment*/
+        l -= 16;
+        _mm512_store_epi32(input + l, vecOH);
+      }else{
+        /*write vecOH to the right segment*/
+        r -= 16;
+        _mm512_store_epi32(input + r, vecOH);
+      }
+    }else if (l < mid){
+      /*write vecOH to the right segment*/
+      r -= 16;
+      _mm512_store_epi32(input + r, vecOH);
+    }else if(r < right){
+      /*write vecOH to the left segment*/
+      l -= 16;
+      _mm512_store_epi32(input + l, vecOH);
+    }else{
+			/*write vecOH to the output as neither segment has leftover*/
+			_mm512_store_epi32(output + p, vecOH);
+		}
+	
+		/*start serial merge*/
+   	while(l < mid && r < right){
+    	if(input[r] < input[l]){
+      	/*save the element from the right segment to temp array*/
+   			output[p++] = input[r++];
+    	}else{
+      	/*save the element from the left segment to temp array*/
+     		output[p++] = input[l++];
+   		}
+		}
+#endif
+
+		/*copy the rest to the buffer*/
+		if(l < mid){
+			memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+		}else if(r < right){
+			memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+		}
+#else	/*non-vectorized for CPUs and Phis*/
+    /*for short segments*/
+#if defined(INSERTION_SORT)
+    if(mid - left < 16 || right - mid < 16){
+      /*use insertion sort*/
+      uint32_t curr;
+      for(l = left + 1; l < right; ++l){
+        curr = input[l]; r = l;
+        while(r > left && input[r - 1] > curr){
+          input[r] = input[r - 1];
+          r--;
+        }
+        input[r] = curr;
+      }
+      /*copy the rest*/
+      memcpy(output + left, input + left, (right - left) * sizeof(uint32_t));
+
+			/*return*/
+			return;
+		}
+#else
+    l = left; r = mid;
+    while(l < mid && r < right){
+      if(input[r] < input[l]){
+        output[p++] = input[r++];
+      }else{
+        output[p++] = input[l++];
+      }
+    }
+		/*copy the remaining to the output buffer*/
+		if(l < mid){
+			memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+		}else if(r < right){
+			memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+		}
+#endif	/*INSERTION_SORT*/
+#endif	/*__MIC__*/
+	}
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeSort(uint32_t* data, uint32_t* mergeBuffer, const int numElems)
+	{
+		int mid, right;
+		ssize_t numDiscordantPairs = 0;
+		uint32_t*input = data;
+		uint32_t *output = mergeBuffer;
+		double stime, etime;
+
+		/*merge sort*/
+		//stime = getSysTime();
+		for(int stride = 1; stride <= numElems; stride *= 2){
+			
+			/*per-level computation*/
+			for(int left = 0; left < numElems; left += 2 * stride){
+				mid = left + stride;
+				if(mid > numElems){
+					mid = numElems;
+				}
+				right = left + 2 * stride;
+				if(right > numElems){
+					right = numElems;
+				}
+				//printf("left: %d mid: %d right: %d stride: %d\n", left, mid, right, stride);
+				
+				/*merge the two parts*/
+				numDiscordantPairs += knightMergeOutPlace(input, output, left, mid, right);
+			}
+
+			/*swap the buffer pointers*/
+			uint32_t* tmp = input;
+			input = output;
+			output = tmp;
+		}
+		if(data != input){
+			/*copy to the original input array*/
+			memcpy(data, input, numElems * sizeof(*data));
+		}
+		//etime = getSysTime();
+		//printf("Throughput: %f elements per second (in %f second)\n", (double)numElems / (etime - stime), etime - stime);
+#if 0
+		printf("sorted results:\n");
+		for(int i = 0; i < numElems; ++i){
+			printf("%d ", data[i]);
+			if(i && i %32 == 0){
+				printf("\n");
+			}
+		}
+		printf("#discordant pairs: %ld\n", numDiscordantPairs);
+#endif
+
+#if 0
+    for(int i = 1; i < numElems; ++i){
+      if(data[i] <= data[i - 1]){
+        printf("inconsistent order: (%d < %d)\n", data[i], data[i-1]);
+        break;
+      }
+    }
+#endif
+		return numDiscordantPairs;
+	}
+
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static ssize_t knightMergeOutPlace(uint32_t* input, uint32_t*output, int left, int mid, int right){
+		int l, r, p = left;
+		ssize_t numDiscordantPairs = 0;
+
+#if defined(__MIC__) && defined(SIMD_AVX512)
+		int nbits, leadL, leadR, lead;
+		const __m512i vecIndexInc = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+		const __m512i vecReverse = _mm512_set_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+		const __m512i vecMaxInt = _mm512_set1_epi32(0x7fffffff);
+		const __m512i vecMid = _mm512_set1_epi32(mid);
+		const __m512i vecRight = _mm512_set1_epi32(right);
+		const __m512i vecPermuteIndex16 = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8);
+		const __m512i vecPermuteIndex8 = _mm512_set_epi32(11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4);
+	 	const __m512i vecPermuteIndex4 = _mm512_set_epi32(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
+   	const __m512i vecPermuteIndex2 = _mm512_set_epi32(14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
+		__m512i vecC, vecD, vecOL, vecOH;
+		__m512i vecL1, vecH1, vecL2, vecH2, vecL3, vecH3, vecL4, vecH4;
+		__mmask16 vecMaskOL, vecMaskOH;
+
+		/*for short segments*/
+		if(mid - left < 16 || right - mid < 16){
+ 	   	l = left; r = mid;
+  	  while(l < mid && r < right){
+      	if(input[r] < input[l]){
+
+        	/*count the number of discordant pairs*/
+	        numDiscordantPairs += mid - l;
+
+  	      /*save the element from the right segment to temp array*/
+    	    output[p++] = input[r++];
+     	 	}else{
+
+        	/*save the element from the left segment to temp array*/
+        	output[p++] = input[l++];
+      	}
+    	}
+    	/*copy the remaining to the output buffer*/
+    	if(l < mid){
+      	memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+    	}else if(r < right){
+      	memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+    	}
+		
+			/*return the number if discordant pairs*/
+			return numDiscordantPairs;
+		}
+	
+		/*use simd vectorization*/
+		l = left;	r = mid;
+		/*compute the number of discordant pairs*/
+		while(l < mid && r < right){
+			if(input[r] < input[l]){
+				numDiscordantPairs += mid - l;
+				r++;
+			}else{
+				l++;
+			}
+		}
+
+		/*start sorting*/
+		l = left; r = mid;
+		vecOL = _mm512_load_epi32(input + l);
+		vecOH = _mm512_load_epi32(input + r);
+		l += 16; r += 16;
+
+		/*enter the core loop*/	
+		do{
+			/*prefetch input[l] and input[r]*/
+			//#pragma prefetch input
+
+      if(_mm512_reduce_min_epi32(vecOL) >= _mm512_reduce_max_epi32(vecOH)){
+        _mm512_store_epi32(output + p, vecOH);
+        p += 16;
+        vecOH = vecOL;
+      }else if(_mm512_reduce_min_epi32(vecOH) >= _mm512_reduce_max_epi32(vecOL)){
+        _mm512_store_epi32(output + p, vecOL);
+        p += 16;
+      }else{
+				/*in-register bitonic merge network*/
+				vecOH = _mm512_permutevar_epi32(vecReverse, vecOH);	/*reverse B*/
+
+				/*Level 1*/
+				vecL1 = _mm512_min_epi32(vecOL, vecOH);
+				vecH1 = _mm512_max_epi32(vecOL, vecOH);
+				//printVector(vecL1, __LINE__);
+				//printVector(vecH1, __LINE__);
+
+				/*Level 2*/
+      	vecC = _mm512_permutevar_epi32(vecPermuteIndex16, vecL1);
+      	vecD = _mm512_permutevar_epi32(vecPermuteIndex16, vecH1);
+				vecL2 = _mm512_mask_min_epi32(vecL2, 0x00ff, vecC, vecL1);
+				vecH2 = _mm512_mask_min_epi32(vecH2, 0x00ff, vecD, vecH1);
+				vecL2 = _mm512_mask_max_epi32(vecL2, 0xff00, vecC, vecL1);
+				vecH2 = _mm512_mask_max_epi32(vecH2, 0xff00, vecD, vecH1);
+				//printVector(vecL2, __LINE__);
+				//printVector(vecH2, __LINE__);
+
+				/*Level 3*/
+				vecC = _mm512_permutevar_epi32(vecPermuteIndex8, vecL2);
+				vecD = _mm512_permutevar_epi32(vecPermuteIndex8, vecH2);
+      	vecL3 = _mm512_mask_min_epi32(vecL3, 0x0f0f, vecC, vecL2);
+      	vecH3 = _mm512_mask_min_epi32(vecH3, 0x0f0f, vecD, vecH2);
+      	vecL3 = _mm512_mask_max_epi32(vecL3, 0xf0f0, vecC, vecL2);
+      	vecH3 = _mm512_mask_max_epi32(vecH3, 0xf0f0, vecD, vecH2);
+     		//printVector(vecL3, __LINE__);
+     		//printVector(vecH3, __LINE__);
+
+				/*Level 4*/
+      	vecC = _mm512_permutevar_epi32(vecPermuteIndex4, vecL3);
+      	vecD = _mm512_permutevar_epi32(vecPermuteIndex4, vecH3);
+      	vecL4 = _mm512_mask_min_epi32(vecL4, 0x3333, vecC, vecL3);
+      	vecH4 = _mm512_mask_min_epi32(vecH4, 0x3333, vecD, vecH3);
+      	vecL4 = _mm512_mask_max_epi32(vecL4, 0xcccc, vecC, vecL3);
+      	vecH4 = _mm512_mask_max_epi32(vecH4, 0xcccc, vecD, vecH3);
+     		//printVector(vecL4, __LINE__);
+     		//printVector(vecH4, __LINE__);
+
+				/*Level 5*/
+      	vecC = _mm512_permutevar_epi32(vecPermuteIndex2, vecL4);
+      	vecD = _mm512_permutevar_epi32(vecPermuteIndex2, vecH4);
+      	vecOL = _mm512_mask_min_epi32(vecOL, 0x5555, vecC, vecL4);
+      	vecOH = _mm512_mask_min_epi32(vecOH, 0x5555, vecD, vecH4);
+      	vecOL = _mm512_mask_max_epi32(vecOL, 0xaaaa, vecC, vecL4);
+      	vecOH = _mm512_mask_max_epi32(vecOH, 0xaaaa, vecD, vecH4);
+				//printVector(vecOL, __LINE__);
+				//printVector(vecOH, __LINE__);
+
+				/*save vecL to the output vector: always memory aligned*/
+				_mm512_store_epi32(output + p, vecOL);
+				p += 16;
+			}
+			
+			/*condition check*/
+			if(l + 16 >= mid || r + 16 >= right){
+				break;
+			}
+	
+			/*determine which segment to use*/
+			leadL = input[l];
+			leadR = input[r];
+			lead = _mm512_reduce_max_epi32(vecOH);
+			if(lead <= leadL && lead <= leadR){
+				_mm512_store_epi32(output + p, vecOH);
+				vecOL = _mm512_load_epi32(input + l);
+				vecOH = _mm512_load_epi32(input + r);
+				p += 16;
+				l += 16;
+				r += 16;
+			}else if(leadR < leadL){
+				vecOL = _mm512_load_epi32(input + r);
+				r += 16;
+			}else{
+				vecOL = _mm512_load_epi32(input + l);
+				l += 16;
+			}
+		}while(1);
+
+#if defined(SIMD_AVX512_LEFTOVER)
+		/*process the remaining*/
+		vecMaskOH = 0x0ffff;	/*guaranteed*/
+		while(l < mid || r < right){
+
+			/*load a new segment of data*/
+			if(l < mid && r < right){
+				/*determine which segment to use*/
+				if(input[r] < input[l]){
+					vecC = _mm512_add_epi32(_mm512_set1_epi32(r), vecIndexInc);
+					vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecRight);
+					vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + r);
+					r += 16;
+				}else{
+					vecC = _mm512_add_epi32(_mm512_set1_epi32(l), vecIndexInc);
+					vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecMid);
+					vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + l);
+					l += 16;
+				}
+			}else if(l < mid){
+				vecC = _mm512_add_epi32(_mm512_set1_epi32(l), vecIndexInc);
+				vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecMid);
+				vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + l);
+			
+				/*no need to continue comparison*/
+				if(_mm512_mask_reduce_max_epi32(vecMaskOH, vecOH) <= _mm512_reduce_min_epi32(vecOL)){
+					break;
+				}
+				l += 16;
+			}else if(r < right){
+      	vecC = _mm512_add_epi32(_mm512_set1_epi32(r), vecIndexInc);
+      	vecMaskOL = _mm512_cmplt_epi32_mask(vecC, vecRight);
+       	vecOL = _mm512_mask_load_epi32(vecMaxInt, vecMaskOL, input + r);
+
+				/*no need to continue comparison*/
+				if(_mm512_mask_reduce_max_epi32(vecMaskOH, vecOH) <= _mm512_reduce_min_epi32(vecOL)){
+					break;
+				}
+				r += 16;
+			}
+
+			/*prefetch input[l] and input[r]*/
+			//#pragma prefetch input
+
+			/*in-register bitonic merge network*/
+			vecOH = _mm512_permutevar_epi32(vecReverse, vecOH);	/*reverse B*/
+
+			/*Level 1*/
+			vecL1 = _mm512_min_epi32(vecOL, vecOH);
+			vecH1 = _mm512_max_epi32(vecOL, vecOH);
+			//printVector(vecL1, __LINE__);
+			//printVector(vecH1, __LINE__);
+
+			/*Level 2*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex16, vecL1);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex16, vecH1);
+			vecL2 = _mm512_mask_min_epi32(vecL2, 0x00ff, vecC, vecL1);
+			vecH2 = _mm512_mask_min_epi32(vecH2, 0x00ff, vecD, vecH1);
+			vecL2 = _mm512_mask_max_epi32(vecL2, 0xff00, vecC, vecL1);
+			vecH2 = _mm512_mask_max_epi32(vecH2, 0xff00, vecD, vecH1);
+			//printVector(vecL2, __LINE__);
+			//printVector(vecH2, __LINE__);
+
+			/*Level 3*/
+			vecC = _mm512_permutevar_epi32(vecPermuteIndex8, vecL2);
+			vecD = _mm512_permutevar_epi32(vecPermuteIndex8, vecH2);
+      vecL3 = _mm512_mask_min_epi32(vecL3, 0x0f0f, vecC, vecL2);
+      vecH3 = _mm512_mask_min_epi32(vecH3, 0x0f0f, vecD, vecH2);
+      vecL3 = _mm512_mask_max_epi32(vecL3, 0xf0f0, vecC, vecL2);
+      vecH3 = _mm512_mask_max_epi32(vecH3, 0xf0f0, vecD, vecH2);
+     	//printVector(vecL3, __LINE__);
+     	//printVector(vecH3, __LINE__);
+
+			/*Level 4*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex4, vecL3);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex4, vecH3);
+      vecL4 = _mm512_mask_min_epi32(vecL4, 0x3333, vecC, vecL3);
+      vecH4 = _mm512_mask_min_epi32(vecH4, 0x3333, vecD, vecH3);
+      vecL4 = _mm512_mask_max_epi32(vecL4, 0xcccc, vecC, vecL3);
+      vecH4 = _mm512_mask_max_epi32(vecH4, 0xcccc, vecD, vecH3);
+     	//printVector(vecL4, __LINE__);
+     	//printVector(vecH4, __LINE__);
+
+			/*Level 5*/
+      vecC = _mm512_permutevar_epi32(vecPermuteIndex2, vecL4);
+      vecD = _mm512_permutevar_epi32(vecPermuteIndex2, vecH4);
+      vecOL = _mm512_mask_min_epi32(vecOL, 0x5555, vecC, vecL4);
+      vecOH = _mm512_mask_min_epi32(vecOH, 0x5555, vecD, vecH4);
+      vecOL = _mm512_mask_max_epi32(vecOL, 0xaaaa, vecC, vecL4);
+      vecOH = _mm512_mask_max_epi32(vecOH, 0xaaaa, vecD, vecH4);
+			//printVector(vecOL, __LINE__);
+			//printVector(vecOH, __LINE__);
+
+			/*save vecL to the output vector: not always memory aligned*/
+			nbits = _mm_countbits_32(vecMaskOL) + _mm_countbits_32(vecMaskOH);
+			vecMaskOL = nbits > 15 ? 0x0ffff : (1 << nbits) - 1;
+			vecMaskOH = nbits < 17 ? 0 : (1 << (nbits - 16)) - 1;
+			_mm512_mask_store_epi32(output + p, vecMaskOL, vecOL);
+			p += _mm_countbits_32(vecMaskOL);
+		}
+		
+		/*process the last segment and not guaranteed to be memory aligned*/
+		_mm512_mask_packstorelo_epi32(output + p, vecMaskOH, vecOH);
+		_mm512_mask_packstorehi_epi32(output + p + 16, vecMaskOH, vecOH);
+		p += _mm_countbits_32(vecMaskOH);
+#else
+		/*use non-vectorized code to process the leftover*/
+		if(l < mid && r < right){
+			if(input[r] < input[l]){
+				/*write vecOH to the left segment*/
+				l -= 16;
+				_mm512_store_epi32(input + l, vecOH);
+			}else{
+				/*write vecOH to the right segment*/
+				r -= 16;
+				_mm512_store_epi32(input + r, vecOH);
+			}
+		}else if (l < mid){
+			/*write vecOH to the right segment*/
+			r -= 16;
+			_mm512_store_epi32(input + r, vecOH);
+		}else if(r < right){
+			/*write vecOH to the left segment*/
+			l -= 16;
+			_mm512_store_epi32(input + l, vecOH);
+		}else{
+			/*write vecOH since neither segment has leftover*/
+			_mm512_store_epi32(output + p, vecOH);
+		}
+		/*start serial merge*/
+   	while(l < mid && r < right){
+    	if(input[r] < input[l]){
+      	/*save the element from the right segment to temp array*/
+   			output[p++] = input[r++];
+    	}else{
+      	/*save the element from the left segment to temp array*/
+     		output[p++] = input[l++];
+   		}
+		}
+#endif
+		/*copy the rest to the buffer*/
+		if(l < mid){
+			memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+		}else if(r < right){
+			memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+		}
+#else	/*non-vectorized for CPUs and Phis*/
+    l = left; r = mid;
+    while(l < mid && r < right){
+      if(input[r] < input[l]){
+
+        /*count the number of discordant pairs*/
+        numDiscordantPairs += mid - l;
+
+        /*save the element from the right segment to temp array*/
+        output[p++] = input[r++];
+      }else{
+
+        /*save the element from the left segment to temp array*/
+        output[p++] = input[l++];
+      }
+    }
+		/*copy the remaining to the output buffer*/
+		if(l < mid){
+			memcpy(output + p, input + l, (mid - l) * sizeof(uint32_t));
+		}else if(r < right){
+			memcpy(output + p, input + r, (right - r) * sizeof(uint32_t));
+		}
+#endif
+
+		/*return the number of discordant pairs*/
+		return numDiscordantPairs;
+	}
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static void printVector(__m512i vecVar, int line)
+	{
+		uint32_t buffer[16] __attribute__((aligned(64)));
+		_mm512_store_epi32(buffer, vecVar);
+
+		printf("vector (%d): ", line);
+		for(int i = 0; i < 16; ++i){
+			printf("%d ", buffer[i]);
+		}
+		printf("\n");
+	}
+
+	#ifdef WITH_PHI
+	__attribute__((target(mic)))
+	#endif
+	static void countNumTiesFirstPair(uint32_t* data, const int numElems, ssize_t& numTiesX, ssize_t& numTiesXY)
+	{
+		bool cond, cond2;
+		int i, startX, startXY;
+		ssize_t n;
+
+		startX = startXY = -1;
+		numTiesX = numTiesXY = 0;
+		for(i = 0; i < numElems - 1; ++i){
+			cond = (data[i]>>16) != (data[i + 1] >> 16);
+			cond2 = (data[i] & 0x0ffff) != (data[i + 1] & 0x0ffff);
+
+			/*count the number of ties in X*/
+			if(cond){
+				n = i - startX;
+				if(n > 1){
+					numTiesX += n * (n - 1) / 2;
+				}
+				startX = i;
+			}
+
+			/*count the number of joint ties in X and Y*/
+			if(cond || cond2){
+				n = i - startXY;
+				if(n > 1){
+					numTiesXY += n * (n - 1) / 2;
+				}
+				startXY = i;
+			}
+		}
+		n = i - startX;
+		if(n > 1){
+			numTiesX += n * (n - 1) / 2;
+		}
+		n = i - startXY;
+		if(n > 1){
+			numTiesXY += n * (n - 1) / 2;
+		}
+	}
+
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static ssize_t countNumTiesSecond(uint32_t* data, int numElems)
+  {
+    int n, i, start;
+    ssize_t numTies = 0;
+
+    for(i = 0, start = -1; i < numElems - 1; ++i){
+      if((data[i] & 0x0ffff) != (data[i + 1] & 0x0ffff)){
+        n = i - start;
+        if(n > 1){
+          numTies += n * (n - 1) / 2;
+        }
+        /*re-set start*/
+        start = i;
+      }
+    }
+    n = i - start;
+    if(n > 1){
+      numTies += n * (n - 1) / 2;
+    }
+		
+		return numTies;
+  }
+  #ifdef WITH_PHI
+  __attribute__((target(mic)))
+  #endif
+  static ssize_t countNumTiesPair(uint32_t* data, int numElems)
+  {
+    int n, i, start;
+    ssize_t numTies = 0;
+
+    for(i = 0, start = -1; i < numElems - 1; ++i){
+      if((data[i] >> 16) != (data[i + 1] >> 16) || (data[i] & 0x0ffff) != (data[i + 1] & 0x0ffff)){
+        n = i - start;
+        if(n > 1){
+          numTies += n * (n - 1) / 2;
+        }
+        /*re-set start*/
+        start = i;
+      }
+    }
+    n = i - start;
+    if(n > 1){
+      numTies += n * (n - 1) / 2;
+    }
+
+    return numTies;
+  }
+};
+
+#endif
