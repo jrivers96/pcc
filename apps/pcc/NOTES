@@ -1,0 +1,2 @@
+./PCC pearsonmkl -n 400000 -l 400 -m 1 -d 0
+./PCC pearsonmkl -i /home/ubuntu/data/foo.csv-m 1 -d 0

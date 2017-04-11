@@ -1,0 +1,474 @@
+command line: pearson -n 4000000 -l 400 -m 0 -d 0 
+Double precision: 0
+Vector size: 400
+Number of vectors: 4000000
+Number of vector pairs: 8000002000000
+Execution mode: 0
+execute function runSingleThreaded
+time for transformation: 1.637985 seconds
+command line: pearson -n 4000000 -l 400 -m 1 -d 0 
+Double precision: 0
+Vector size: 400
+Number of vectors: 4000000
+Number of vector pairs: 8000002000000
+Execution mode: 1
+execute function runMultiThreaded
+Get number of vectors and vector size
+Number of samples: 393
+Number of compound id profiles: 4098687
+command line: pearsonmkl -i /home/ubuntu/data/htsfp_chris.csv -m 1 -d 0 
+Double precision: 0
+Vector size: 393
+Number of vectors: 4098687
+Number of vector pairs: 8399619611328
+Execution mode: 1
+execute function runMultiThreaded
+numVectors: 4098687 
+desiredBatch: 500 
+numBatched: 8198 
+vdPow: 7.670304 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+Get number of vectors and vector size
+Number of samples: 393
+Number of compound id profiles: 4098687
+command line: pearsonmkl -i /home/ubuntu/data/htsfp_chris.csv -m 1 -d 0 
+Double precision: 0
+Vector size: 393
+Number of vectors: 4098687
+Number of vector pairs: 8399619611328
+Execution mode: 1
+execute function runMultiThreaded
+numVectors: 4098687 
+desiredBatch: 500 
+numBatched: 8198 
+vdPow: 5.006633 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 0 
+_endVec: 499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 18.603225 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 19.541015 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 500 
+_endVec: 999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 20.571789 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 18.725117 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 1000 
+_endVec: 1499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 20.703867 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 18.488316 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 1500 
+_endVec: 1999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 18.585678 seconds
+Create index time: 0.000002 seconds
+VSize: 788394 
+Map time: 19.055786 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 2000 
+_endVec: 2499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 21.714853 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 20.290706 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 2500 
+_endVec: 2999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 17.592307 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 19.732620 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 3000 
+_endVec: 3499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 17.568371 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 18.885466 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 3500 
+_endVec: 3999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 21.186290 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 18.516713 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 4000 
+_endVec: 4499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 22.555053 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 18.579197 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 4500 
+_endVec: 4999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 21.432009 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 18.547238 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 5000 
+_endVec: 5499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 19.778305 seconds
+Create index time: 0.000002 seconds
+VSize: 788394 
+Map time: 18.541434 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 5500 
+_endVec: 5999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 17.017236 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 18.533908 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 6000 
+_endVec: 6499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 21.108019 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 18.480236 seconds
+mSize: 500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 6500 
+_endVec: 6999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 21.838356 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Get number of vectors and vector size
+Number of samples: 393
+Number of compound id profiles: 4098687
+command line: pearsonmkl -i /home/ubuntu/data/htsfp_chris.csv -m 1 -d 0 
+Double precision: 0
+Vector size: 393
+Number of vectors: 4098687
+Number of vector pairs: 8399619611328
+Execution mode: 1
+execute function runMultiThreaded
+numVectors: 4098687 
+desiredBatch: 1500 
+numBatched: 2733 
+vdPow: 5.134878 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 0 
+_endVec: 1499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 57.817295 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 56.299258 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 1500 
+_endVec: 2999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 60.395086 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 56.381456 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 3000 
+_endVec: 4499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 55.556292 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 57.434901 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 4500 
+_endVec: 5999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 63.800784 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 56.130502 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 6000 
+_endVec: 7499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 64.865795 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 55.712152 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 7500 
+_endVec: 8999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 60.402938 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 56.095709 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 9000 
+_endVec: 10499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 61.786856 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 55.997318 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 10500 
+_endVec: 11999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 59.223310 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 56.024715 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 12000 
+_endVec: 13499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 59.166241 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 55.793498 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 13500 
+_endVec: 14999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 58.382880 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 55.638724 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 15000 
+_endVec: 16499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 62.200721 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 55.918292 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 16500 
+_endVec: 17999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 65.902430 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Map time: 56.138339 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 18000 
+_endVec: 19499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 59.346424 seconds
+Create index time: 0.000001 seconds
+VSize: 788394 
+Map time: 55.926294 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 19500 
+_endVec: 20999 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
+Batch time: 66.014948 seconds
+Create index time: 0.000000 seconds
+VSize: 788394 
+Get number of vectors and vector size
+Number of samples: 393
+Number of compound id profiles: 4098687
+command line: pearsonmkl -i /home/ubuntu/data/htsfp_chris.csv -m 1 -d 0 
+Double precision: 0
+Vector size: 393
+Number of vectors: 4098687
+Number of vector pairs: 8399619611328
+Execution mode: 1
+execute function runMultiThreaded
+numVectors: 4098687 
+desiredBatch: 1500 
+numBatched: 2733 
+vdPow: 6.143599 seconds
+mSize: 1500 
+vectorSize: 393 
+_vectorSizeAligned: 400 
+_startVec: 0 
+_endVec: 1499 
+numerator 
+left den 
+right den 
+begin counts 
+Begin normalize
