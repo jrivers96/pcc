@@ -522,7 +522,9 @@ stringstream stream;
 for(int xx = 0; xx < numBatches; ++xx)
  {
   ltime = getSysTime();
-  size_t mSize = endVec[xx] - startVec[xx] + 1;
+  siize_t mSize = endVec[xx] - startVec[xx] + 1;
+
+
 
   fprintf(stderr, "mSize: %u \n", mSize);
   fprintf(stderr, "vectorSize: %u \n", _vectorSize);
@@ -553,7 +555,6 @@ for(int xx = 0; xx < numBatches; ++xx)
   long ix;
   //combine left and right denominator
 
-#ifdef DETAILDEBUG
 for(size_t ii=0; ii < flatSize; ++ii)
 {
 //fprintf(stderr,"%f,", tempX[ii]);
@@ -574,7 +575,9 @@ for(size_t ii=0; ii < flatSize; ++ii)
 fprintf(stderr,"\n" );
 #endif
 
-  #pragma omp parallel for shared(flatSize, tempX, tempY) default(none)
+  //#pragma omp parallel for shared(flatSize, tempX, tempY) default(none)
+  #pragma vector aligned
+  #pragma simd
   for(size_t j = 0; j < flatSize; ++j){
        tempY[j] = _pearsonCorr[j]/sqrt(tempX[j]*tempY[j]);
   }
@@ -613,14 +616,22 @@ fprintf(stderr, "counts \n");
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[1853047522]/tempY[1853047522]);
 #endif
   fprintf(stderr, "Begin normalize\n");
+
+
   letime = getSysTime();
   fprintf(stderr, "Batch time: %f seconds\n", letime - ltime);
 
   mtime = getSysTime();
  //The values below range from [0 2000] * 400 + 400 = max(800400)
 
+ /*#pragma omp parallel for shared(tempY, tempX, flatSize, vecSize) default(none)
+ #pragma vector aligned
+ #paragma simd
+ */
+
   mtime = getSysTime();
   pccLarge = _pearsonCorr;
+
 
  const size_t vecSize = _vectorSize;
 /* #pragma vector aligned
@@ -635,15 +646,15 @@ fprintf(stderr, "counts \n");
        idxSave[j] = _pearsonCorr[j] * vecSize + tempX[j];
  }
  */
-
-#pragma omp parallel for shared(flatSize, tempX, tempY, idxSave, vecSize) default(none)
-#pragma vector aligned
+  #pragma vector aligned
 #pragma simd
   for(size_t j = 0; j < flatSize; ++j){
        idxSave[j] =  (tempY[j] + 1000.0)*vecSize + tempX[j];
   }
 
-//#define NEIGHBORS 1
+
+
+#define NEIGHBORS 1
 #ifdef NEIGHBORS
 size_t numNeighbors = 100;
 IppStatus status;
@@ -667,24 +678,7 @@ ofstream myfile;
 myfile.open("neighbors.csv", std::ofstream::out |  std::ofstream::app);
 int nPrint;
 double pcc;//IppDataType type = ippiGetDataType(idxSave);
-int count;
-size_t pneighbor = min(numNeighbors,_numVectors);
-for(size_t j=0; j < mSize; j++)
-{
-  size_t begin = j*_numVectors;
-  for(size_t nn = 0; nn < pneighbor; nn++)
-    {
-     float printpcc = tempY[begin+nn];
-     size_t neighborid = dstIdx[begin+nn];
-
-     myfile << std::setprecision(6) << j << " " << printpcc << " " << neighborid << "\n";
-    }
-}
-myfile.close(); 
-#endif
-
-
-/*Ipp32s len;
+ /*Ipp32s len;
  ippsSortRadixIndexGetBufferSize(flatSize, ipp32u ,&len);
 
  Ipp8u* TMP =  (Ipp8u*) ippsMalloc_8u(
@@ -694,7 +688,7 @@ myfile.close();
     exit(-1);
   }
 */
-/*
+
 ppsSortRadixIndexGetBufferSize(flatSize, ipp32u ,&len);
 
  Ipp8u* TMP =  (Ipp8u*) ippsMalloc_8u(
@@ -752,7 +746,9 @@ size_t reduceSize=xx;
 
  fprintf(stderr, "VSize: %lu \n", vSize );
 
- //#pragma omp parallel for shared(flatSize, idxSave, v, vSize) default(none)
+
+
+ #pragma omp parallel for shared(flatSize, idxSave, v) default(none)
  for(size_t j = 0; j < flatSize; ++j){
  size_t ixx =  idxSave[j]; 
  if((ixx > vSize) && (isinf(ixx)!= 0) ){

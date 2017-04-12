@@ -13,11 +13,14 @@
 #include <CustomFileReader.hpp>
 #include <string>
 #include <vector>
+#include <Utilities.h>
+
 using namespace std;
 
 #ifndef EXP_SKIP_TWO_ROWS
 #define EXP_SKIP_TWO_ROWS false
 #endif
+
 
 /*use the same format with ARACNE*/
 template<typename FloatType>
@@ -92,7 +95,6 @@ bool EXPMatrixReader<FloatType>::getMatrixSize(string& fileName, int& numVectors
 
 	return true;
 }
-
 template<typename FloatType>
 bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 		vector<string>& genes, vector<string>& samples, FloatType* vectors,
@@ -130,11 +132,11 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 	}
 	/*tok = strtok(NULL, delim);
 	if(tok == NULL){
-    fprintf(stderr, "Incomplete header at line %d\n", __LINE__);
-    fileReader.close();
-    return false;
+        fprintf(stderr, "Incomplete header at line %d\n", __LINE__);
+        fileReader.close();
+        return false;
 	}
-  */
+        */
 	/*save sample names*/
 	for (tok = strtok(NULL, delim); tok != NULL; tok = strtok(NULL, delim)) {
 		samples.push_back(string(tok));
@@ -180,8 +182,9 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 		}
 
 		/*skip the first two columns*/
-		tok = strtok(buffer, delim);
-		if(tok == NULL){
+		//tok = strtok(buffer, delim);
+		tok = strtok_single(buffer, delim);
+                if(tok == NULL){
 			fprintf(stderr, "incomplete file at line %d\n", __LINE__);
 			fileReader.close();
 			return false;
@@ -189,18 +192,18 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 		/*save the entity id*/
 		genes.push_back(string(tok));
  
-    /* riversj
+                /* riversj
 		tok = strtok(NULL, delim);
-    if(tok == NULL){
-      fprintf(stderr, "incomplete file at line %d\n", __LINE__);
-      fileReader.close();
-      return false;
-    }
-    */
+                if(tok == NULL){
+                   fprintf(stderr, "incomplete file at line %d\n", __LINE__);
+                   fileReader.close();
+                   return false;
+                }
+                */
 		/*extract gene expression values*/
 		index = 0;
-		for (tok = strtok(NULL, delim); tok != NULL;
-				tok = strtok(NULL, delim)) {
+		for (tok = strtok_single(NULL, delim); tok != NULL;
+				tok = strtok_single(NULL, delim)) {
 			if (index >= vectorSize) {
 				fprintf(stderr,
 						"Error: number of entity id values is inconsistent with others\n");
@@ -209,6 +212,7 @@ bool EXPMatrixReader<FloatType>::loadMatrixData(string& fileName,
 			}
 	
 			/*save the value*/
+                        //fprintf(stderr,	"token:%s\n",tok);
 			*(vectors + numGenes * vectorSizeAligned + index) = atof(tok);
 
 			/*increase the index*/
