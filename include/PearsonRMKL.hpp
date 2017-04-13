@@ -290,7 +290,7 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
 	/*record system time*/
 	stime = getSysTime();
 
-	/*allocate space*/
+  /*allocate space*/
   /*_pearsonCorr = (FloatType*) mm_malloc(
       (ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
   if (!_pearsonCorr) {
@@ -410,6 +410,11 @@ fprintf(stderr,"\n" );
 #endif
 
 size_t vSize = (_vectorSize+1) * 2001;
+size_t vv[vSize]; 
+for(size_t ii = 0; ii < vSize; ii++)
+{
+  vv[ii]=0;
+}
 
 /*
 fprintf(stderr, "Allocating memory for vector locking mechanism NITEMS:%u  sizeof(lock):%u\n", NITEMS, sizeof(omp_lock_t));
@@ -487,9 +492,7 @@ omp_lock_t *lock = (omp_lock_t*) mm_malloc(
                                 //vecX[j] =(double) vecX[j] - meanX;
                                 //vecX[j] = x * varX;
                         }
-
                 }
-
         } /*#pragma omp paralle*/
 
 /*invoke the Intel MKL kernel: multithreads*/
@@ -601,8 +604,8 @@ for(size_t ii=0; ii < flatSize; ++ii)
 {
 //fprintf(stderr,"%f,", _pearsonCorr[ii]);
 }
-fprintf(stderr,"\n" );
-fprintf(stderr, "counts \n");
+  fprintf(stderr,"\n" );
+  fprintf(stderr, "counts \n");
 //vsSqrt((MKL_INT)flatSize,(float *)tempY,(float *)tempY)(
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[40]);
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[80]);
@@ -752,19 +755,27 @@ size_t reduceSize=xx;
 
  fprintf(stderr, "VSize: %lu \n", vSize );
 
- //#pragma omp parallel for shared(flatSize, idxSave, v, vSize) default(none)
- for(size_t j = 0; j < flatSize; ++j){
- size_t ixx =  idxSave[j]; 
- if((ixx > vSize) && (isinf(ixx)!= 0) ){
+ //double vv[10]={};
+ double a = 2;
+
+ #pragma omp parallel for reduction(+:vv) 
+ for(size_t j = 0; j < vSize; ++j){
+  vv[j]+=a;
+ }
+
+//#pragma omp parallel for reduction(+:vv) 
+for(size_t j = 0; j < flatSize; ++j){
+size_t ixx =  idxSave[j]; 
+if((ixx > vSize) && (isinf(ixx)!= 0) ){
    /*fprintf(stderr, "[j:%d]ixx: %lu \n", j, ixx );
    fprintf(stderr, "pearsonCorr: %f \n", _pearsonCorr[j]);
    fprintf(stderr, "tempX: %f \n",tempX[j]);
    fprintf(stderr, "tempY: %f \n",tempY[j]);
    */
    continue;
-  }
-  v[ixx]+=1;
  }
+ v[ixx]+=1;
+}
 
  metime = getSysTime();
  fprintf(stderr, "Map time: %f seconds\n", metime - mtime);
