@@ -19,6 +19,7 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <functional>
 
 using namespace std;
 #pragma once
@@ -287,8 +288,8 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
   fprintf(stderr, "execute function %s\n", __FUNCTION__);
 #endif
 
-	/*record system time*/
-	stime = getSysTime();
+  /*record system time*/
+  stime = getSysTime();
 
   /*allocate space*/
   /*_pearsonCorr = (FloatType*) mm_malloc(
@@ -317,9 +318,9 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-startVec[0]=0; 
-endVec[0]= min(_numVectors-1, desiredBatch-1);
-for(int xx = 1; xx < numBatches; ++xx) {
+ startVec[0]=0; 
+ endVec[0]= min(_numVectors-1, desiredBatch-1);
+ for(int xx = 1; xx < numBatches; ++xx) {
    startVec[xx] = startVec[xx-1] +  (desiredBatch); 
    if(startVec[xx] + desiredBatch >= _numVectors){
      endVec[xx]=(ssize_t)_numVectors-1;
@@ -373,12 +374,22 @@ FloatType *tempY = (FloatType*) mm_malloc(
     exit(-1);
   }
 
+/*
  size_t *idxSave = (size_t*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(size_t), 64);
   if (!idxSave) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+*/
+
+int *idxSave = (int*) mm_malloc(
+      (ssize_t) (batchSize) * sizeof(int), 64);
+  if (!idxSave) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+
  
  int *dstIdx = (int*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(int), 64);
@@ -410,37 +421,37 @@ fprintf(stderr,"\n" );
 #endif
 
 size_t vSize = (_vectorSize+1) * 2001;
-size_t vv[vSize]; 
-for(size_t ii = 0; ii < vSize; ii++)
+/*size_t vv[vSize]; 
+for(size_t ii = 0; ii < (num_threads * vSize); ii++)
 {
   vv[ii]=0;
 }
-
+*/
 /*
-fprintf(stderr, "Allocating memory for vector locking mechanism NITEMS:%u  sizeof(lock):%u\n", NITEMS, sizeof(omp_lock_t));
+fprintf(stderr, "Allocating memory for vector locking mechanism NITEMS:%u  sizeof(lock):%u\n", vSize, sizeof(omp_lock_t));
 omp_lock_t *lock = (omp_lock_t*) mm_malloc(
-      (ssize_t) NITEMS * sizeof(omp_lock_t), 64);
+      (ssize_t) vSize * sizeof(omp_lock_t), 64);
   if (!lock) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
-  }
-
- for (long i=0; i<NITEMS; i++)
-        omp_init_lock(&(lock[i]));
+}
+ for (size_t ii=0; ii<vSize; ii++)
+        omp_init_lock(&(lock[ii]));
 */
-
-  size_t *v = (size_t*) mm_malloc(
-      (ssize_t) vSize * sizeof(size_t), 64);
-  if (!v) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-
   /*enter the core computation*/
         if (_numCPUThreads < 1) {
                 _numCPUThreads = omp_get_num_procs();
         }
         omp_set_num_threads(_numCPUThreads);
+
+ size_t *v = (size_t*) mm_malloc(
+      (ssize_t) (_numCPUThreads * vSize) * sizeof(size_t), 64);
+  if (!v) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+fprintf(stderr,"num_threads:\n", _numCPUThreads );
+
 #pragma omp parallel reduction(+:totalNumPairs)
         {
                 ssize_t chunkSize;
@@ -561,15 +572,15 @@ for(size_t ii=0; ii < flatSize; ++ii)
 {
 //fprintf(stderr,"%f,", tempX[ii]);
 }
-fprintf(stderr,"\n" );
 
+fprintf(stderr,"\n" );
 fprintf(stderr,"%f,", tempX[40]);
 fprintf(stderr,"%f,", tempX[80]);
 fprintf(stderr,"%f,", tempX[1853047522]);
-
 fprintf(stderr,"%f,", tempY[40]);
 fprintf(stderr,"%f,", tempY[80]);
 fprintf(stderr,"%f,", tempY[1853047522]);
+
 for(size_t ii=0; ii < flatSize; ++ii)
 {
 //fprintf(stderr,"%f,", tempY[ii]);
@@ -577,16 +588,28 @@ for(size_t ii=0; ii < flatSize; ++ii)
 fprintf(stderr,"\n" );
 #endif
 
-  #pragma omp parallel for shared(flatSize, tempX, tempY) default(none)
+if(sizeof(FloatType) == 4){
+vsSqrt(flatSize, (float *)tempX,(float *)tempX);
+}else{
+vdSqrt(flatSize, (double *)tempX,(double *)tempX);
+}
+
+if(sizeof(FloatType) == 4){
+vsSqrt(flatSize, (float *)tempY,(float *)tempY);
+}else{
+vdSqrt(flatSize, (double *)tempY,(double *)tempY);
+}
+
+pccLarge = _pearsonCorr;
+#pragma omp parallel for shared(flatSize, tempX, tempY, pccLarge) default(none)
   for(size_t j = 0; j < flatSize; ++j){
-       tempY[j] = _pearsonCorr[j]/sqrt(tempX[j]*tempY[j]);
+       tempY[j] = pccLarge[j]/(tempX[j]*tempY[j]);
   }
 
   fprintf(stderr, "begin counts \n");
 
   //generate the counts
   mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, tempX, _numVectors);
-
 
 #ifdef DETAILDEBUG
 fprintf(stderr,"Counts:\n" );
@@ -606,11 +629,10 @@ for(size_t ii=0; ii < flatSize; ++ii)
 }
   fprintf(stderr,"\n" );
   fprintf(stderr, "counts \n");
-//vsSqrt((MKL_INT)flatSize,(float *)tempY,(float *)tempY)(
+  //vsSqrt((MKL_INT)flatSize,(float *)tempY,(float *)tempY)(
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[40]);
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[80]);
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[1853047522]);
-
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[40]/tempY[40]);
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[80]/tempY[80]);
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[1853047522]/tempY[1853047522]);
@@ -624,8 +646,8 @@ for(size_t ii=0; ii < flatSize; ++ii)
 
   mtime = getSysTime();
   pccLarge = _pearsonCorr;
-
  const size_t vecSize = _vectorSize;
+
 /* #pragma vector aligned
   #pragma simd
   for(size_t j = 0; j < flatSize; ++j){
@@ -637,7 +659,56 @@ for(size_t ii=0; ii < flatSize; ++ii)
   for(size_t j = 0; j < flatSize; ++j){
        idxSave[j] = _pearsonCorr[j] * vecSize + tempX[j];
  }
- */
+*/
+
+#pragma omp parallel for shared(flatSize, tempY, idxSave) default(none)
+#pragma vector aligned
+#pragma simd
+  for(size_t j = 0; j < flatSize; ++j){
+       idxSave[j] = tempY[j];
+  }
+
+#define NEIGHBORS 
+#ifdef NEIGHBORS
+
+size_t numNeighbors = 100;
+ltime = getSysTime();
+fprintf(stderr, "Begin neighbor sort\n");
+int c_array[5] = {};
+for(size_t j = 0; j < mSize;j++)
+{
+  size_t begin = j*_numVectors;
+  size_t end = j*_numVectors + _numVectors - 1;
+  
+  //int* c_array_begin = std::begin(&idxSave[0]);
+  //auto c_array_end = std::end((int *)&idxSave[0]);
+  //std::nth_element(c_array_begin, c_array_begin + numNeighbors, c_array_end);
+}
+
+letime = getSysTime();
+fprintf(stderr, "Exit neighbor sort: %f seconds\n", letime - ltime);
+/*
+ofstream myfile;
+myfile.open("neighbors.csv", std::ofstream::out |  std::ofstream::app);
+
+int nPrint;
+double pcc;
+int count;
+
+size_t pneighbor = min(numNeighbors,_numVectors);
+for(size_t j=0; j < mSize; j++)
+{
+  size_t begin = j*_numVectors;
+  for(size_t nn = 0; nn < pneighbor; nn++)
+   {
+     float printpcc = tempY[begin+nn];
+     size_t neighborid = dstIdx[begin+nn];
+     myfile << std::setprecision(6) << j << " " << printpcc << " " << neighborid << "\n";
+   }
+}
+myfile.close(); 
+*/
+#endif
 
 #pragma omp parallel for shared(flatSize, tempX, tempY, idxSave, vecSize) default(none)
 #pragma vector aligned
@@ -646,102 +717,6 @@ for(size_t ii=0; ii < flatSize; ++ii)
        idxSave[j] =  (tempY[j] + 1000.0)*vecSize + tempX[j];
   }
 
-//#define NEIGHBORS 1
-#ifdef NEIGHBORS
-size_t numNeighbors = 100;
-IppStatus status;
-ltime = getSysTime();
-fprintf(stderr, "Begin neighbor sort\n");
-for(size_t j = 0; j < mSize;j++)
-{
-size_t begin = j*_numVectors;
-size_t end = j*_numVectors + _numVectors - 1;
-//std::sort(&tempY[begin], &tempY[end]);
-status = ippsSortIndexDescend_32f_I((float *)&tempY[begin],&dstIdx[begin] , _numVectors);
-if(status != ippStsNoErr)
-{
-fprintf(stderr, "An error occured with the sort\n");
-}
-}
-letime = getSysTime();
-fprintf(stderr, "Exit neighbor sort: %f seconds\n", letime - ltime);
-
-ofstream myfile;
-myfile.open("neighbors.csv", std::ofstream::out |  std::ofstream::app);
-int nPrint;
-double pcc;//IppDataType type = ippiGetDataType(idxSave);
-int count;
-size_t pneighbor = min(numNeighbors,_numVectors);
-for(size_t j=0; j < mSize; j++)
-{
-  size_t begin = j*_numVectors;
-  for(size_t nn = 0; nn < pneighbor; nn++)
-    {
-     float printpcc = tempY[begin+nn];
-     size_t neighborid = dstIdx[begin+nn];
-
-     myfile << std::setprecision(6) << j << " " << printpcc << " " << neighborid << "\n";
-    }
-}
-myfile.close(); 
-#endif
-
-
-/*Ipp32s len;
- ippsSortRadixIndexGetBufferSize(flatSize, ipp32u ,&len);
-
- Ipp8u* TMP =  (Ipp8u*) ippsMalloc_8u(
-      (ssize_t) (len) * sizeof(Ipp8u));
-  if (!TMP) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-*/
-/*
-ppsSortRadixIndexGetBufferSize(flatSize, ipp32u ,&len);
-
- Ipp8u* TMP =  (Ipp8u*) ippsMalloc_8u(
-      (ssize_t) (len) * sizeof(Ipp8u));
-  if (!TMP) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-*/
-/*
- ippSetNumThreads(16);
-
- ltime = getSysTime();
- fprintf(stderr, "Enter sort\n"); //sort((size_t *)idxSave, (size_t *)idxSave+flatSize);
- //Ipp16s vec[10]={0,2,4,5,1,8,9,4,6,7};
- IppStatus status;
- //status = ippsSortRadixAscend_32u_I(idxSave, len, TMP);
- status = ippsSortAscend_32s_I(idxSave, flatSize);
- letime = getSysTime();
- fprintf(stderr, "Exit sort: %f seconds\n", letime - ltime);
-
- size_t jj= 0;
- size_t xx = -1;
- //#pragma vector aligned
- //#pragma simd
- while( jj<flatSize)
-  {
-    size_t val = idxSave[jj] ;
-    size_t count = 0;
-    size_t unij = jj;
-    size_t kk = jj;
-    xx+=1;
-    idxSave[xx]= val;
-    while(val==idxSave[kk] && kk < flatSize)
-    {
-      if(idxSave[kk]==val)
-         count++ ;
-      kk++;
-    }
-    tempY[xx]=count;
-    jj=kk;
- }
-size_t reduceSize=xx;
-*/
  metime = getSysTime();
  fprintf(stderr, "Create index time: %f seconds\n", metime - mtime);
 
@@ -752,20 +727,13 @@ size_t reduceSize=xx;
  }
  */
  mtime = getSysTime();
-
  fprintf(stderr, "VSize: %lu \n", vSize );
-
- //double vv[10]={};
- double a = 2;
-
- #pragma omp parallel for reduction(+:vv) 
- for(size_t j = 0; j < vSize; ++j){
-  vv[j]+=a;
- }
-
-//#pragma omp parallel for reduction(+:vv) 
+ //#pragma omp parallel for reduction(+:vv) 
+ 
+#pragma omp parallel for shared(flatSize, vSize, idxSave,v) default(none)
 for(size_t j = 0; j < flatSize; ++j){
-size_t ixx =  idxSave[j]; 
+   size_t ixx =  idxSave[j]; 
+   const int tid = omp_get_thread_num(); 
 if((ixx > vSize) && (isinf(ixx)!= 0) ){
    /*fprintf(stderr, "[j:%d]ixx: %lu \n", j, ixx );
    fprintf(stderr, "pearsonCorr: %f \n", _pearsonCorr[j]);
@@ -774,7 +742,10 @@ if((ixx > vSize) && (isinf(ixx)!= 0) ){
    */
    continue;
  }
- v[ixx]+=1;
+   //omp_set_lock(&lock[ixx]);
+   //v[ixx]+=1;
+   v[tid*(vSize-1) + ixx]+=1;
+   //omp_unset_lock(&lock[ixx]);
 }
 
  metime = getSysTime();
