@@ -1,5 +1,4 @@
-Refer to the homepage http://lightpcc.sourceforge.net for more information.
-(1) enter "apps/lightpcc" to compile LightPCC
+http://lightpcc.sourceforge.net
 
 Install MPSS which seems to be required by the intel compiler suite
 https://arrayfire.com/getting-started-with-the-intel-xeon-phi-on-ubuntu-14-04linux-kernel-3-13-0/
