@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <omp.h>
 #include <vector>
+#include <queue>
 #include <list>
 #include <typeinfo>
 //conversion of float to string with precision
@@ -22,6 +23,7 @@
 #include <functional>
 
 using namespace std;
+//using namespace mmap_allocator_namespace;
 #pragma once
 
 #ifdef WITH_MPI
@@ -277,6 +279,68 @@ void PearsonRMKL<FloatType>::runSingleThreaded() {
   }
 #endif
 }
+/*
+class MyIterator : public std::iterator<std::input_iterator_tag, int>
+{
+  int* p;
+public:
+  MyIterator(int* x) :p(x) {}
+  MyIterator(const MyIterator& mit) : p(mit.p) {}
+  MyIterator& operator++() {++p;return *this;}
+  MyIterator& operator--() {--p;return *this;}
+  MyIterator operator++(int) {MyIterator tmp(*this); operator++(); return tmp;}
+  MyIterator operator--(int) {MyIterator tmp(*this); operator--(); return tmp;}
+  int  operator-(const MyIterator& rhs)  {return p-rhs.p;}
+  int  operator+(const MyIterator& rhs)  {return p+rhs.p;}
+  MyIterator operator+(const int rhs)  {return p+rhs;}
+  MyIterator operator-(const int rhs)  {return p-rhs;}
+  
+  bool operator==(const MyIterator& rhs) {return p==rhs.p;}
+  //bool operator==(const MyIterator& rhs) {return p==rhs.p;}
+  bool operator!=(const MyIterator& rhs) {return p!=rhs.p;}
+  bool operator<=(const MyIterator& rhs) {return p<=rhs.p;}
+  bool operator<(const MyIterator& rhs) {return p<rhs.p;}
+  int& operator*() {return *p;}
+};
+*/
+/*
+namespace mmap_allocator_namespace
+{
+        template <typename T>
+        class mmap_allocator: public std::allocator<T>
+        {
+                public:
+                typedef size_t size_type;
+                typedef T* pointer;
+                typedef const T* const_pointer;
+
+                template<typename _Tp1>
+                struct rebind
+                {
+                        typedef mmap_allocator<_Tp1> other;
+                };
+
+                pointer allocate(size_type n, const void *hint=0)
+                {
+                        fprintf(stderr, "Alloc %d bytes.\n", n*sizeof(T));
+                        //return std::allocator<T>::allocate(n, hint);
+                        return  mm_malloc((ssize_t)* n *sizeof(T), 64);
+                }
+
+                void deallocate(pointer p, size_type n)
+                {
+                        fprintf(stderr, "Dealloc %d bytes (%p).\n", n * sizeof(T), p);
+                        //return std::allocator<T>::deallocate(p, n);
+                        return mm_free(p);
+                }
+                mmap_allocator() throw(): std::allocator<T>() { fprintf(stderr, "Hello allocator!\n"); }
+                mmap_allocator(const mmap_allocator &a) throw(): std::allocator<T>(a) { }
+                template <class U>                    
+                mmap_allocator(const mmap_allocator<U> &a) throw(): std::allocator<T>(a) { }
+                ~mmap_allocator() throw() { }
+        };
+}
+*/
 
 template<typename FloatType>
 void PearsonRMKL<FloatType>::runMultiThreaded() {
@@ -329,7 +393,6 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
     }
   }
   /*allocate space*/
-
 size_t batchSize = (size_t)_numVectors * (size_t)desiredBatch;
  _pearsonCorr = (FloatType*) mm_malloc(
       (ssize_t) batchSize * sizeof(FloatType), 64);
@@ -374,29 +437,60 @@ FloatType *tempY = (FloatType*) mm_malloc(
     exit(-1);
   }
 
-/*
- size_t *idxSave = (size_t*) mm_malloc(
+#pragma vector aligned
+#pragma simd
+for(size_t ii = 0; ii<dataSize; ii++){
+   power[ii] = 2.0;
+}
+
+#pragma vector aligned
+#pragma simd
+for(size_t ii = 0; ii<dataSize; ii++){
+   countMat[ii] = (_vectors[ii]==0.0) ? 0.0:1.0;
+}
+
+size_t *idxSave = (size_t*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(size_t), 64);
   if (!idxSave) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-*/
+size_t numNeighbors = 100;
+size_t neighborSize = numNeighbors*desiredBatch;
+float *neighborVal = (float*) mm_malloc(
+      (ssize_t) (neighborSize) * sizeof(float), 64);
+  if (!neighborVal) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
 
+size_t *neighborIdx = (size_t*) mm_malloc(
+      (ssize_t) (neighborSize) * sizeof(size_t), 64);
+  if (!neighborIdx) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+
+//std::vector<int, mmap_allocator<int> > idxSave(batchSize, 0, mmap_allocator<int>());
+//std::vector<int> idxSave(batchSize,0);
+//std::priority_queue<std::pair<int, int>> q;
+/*
 int *idxSave = (int*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(int), 64);
   if (!idxSave) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+*/
 
- 
+/* 
  int *dstIdx = (int*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(int), 64);
   if (!dstIdx) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+*/
 
 /*
 Ipp32s* idxSave =  (Ipp32s*) mm_malloc(
@@ -421,12 +515,14 @@ fprintf(stderr,"\n" );
 #endif
 
 size_t vSize = (_vectorSize+1) * 2001;
+
 /*size_t vv[vSize]; 
 for(size_t ii = 0; ii < (num_threads * vSize); ii++)
 {
   vv[ii]=0;
 }
 */
+
 /*
 fprintf(stderr, "Allocating memory for vector locking mechanism NITEMS:%u  sizeof(lock):%u\n", vSize, sizeof(omp_lock_t));
 omp_lock_t *lock = (omp_lock_t*) mm_malloc(
@@ -438,19 +534,31 @@ omp_lock_t *lock = (omp_lock_t*) mm_malloc(
  for (size_t ii=0; ii<vSize; ii++)
         omp_init_lock(&(lock[ii]));
 */
-  /*enter the core computation*/
-        if (_numCPUThreads < 1) {
+
+/*enter the core computation*/
+    if (_numCPUThreads < 1) {
                 _numCPUThreads = omp_get_num_procs();
         }
         omp_set_num_threads(_numCPUThreads);
 
- size_t *v = (size_t*) mm_malloc(
-      (ssize_t) (_numCPUThreads * vSize) * sizeof(size_t), 64);
-  if (!v) {
+ size_t *vv = (size_t*) mm_malloc(
+      (ssize_t) (16 * vSize) * sizeof(size_t), 64);
+  if (!vv) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-fprintf(stderr,"num_threads:\n", _numCPUThreads );
+for(size_t ii=0;ii<(vSize*16);ii++)
+{
+ vv[ii]=0;
+}
+size_t *vvOut = (size_t*) mm_malloc(
+      (ssize_t) (vSize) * sizeof(size_t), 64);
+  if (!vvOut) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+
+fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
 
 #pragma omp parallel reduction(+:totalNumPairs)
         {
@@ -518,7 +626,7 @@ vsPow(dataSize, (float *)_vectors, (float *)power, (float *) squared);
 }else{
 vdPow(dataSize, (double*)_vectors, (double*)power, (double *) squared);
 }
-//mm_free(power);
+mm_free(power);
 
 pltime = getSysTime();
 fprintf(stderr, "vdPow: %f seconds\n", pltime - ptime);
@@ -567,6 +675,7 @@ for(int xx = 0; xx < numBatches; ++xx)
   long ix;
   //combine left and right denominator
 
+//#define DETAILDEBUG
 #ifdef DETAILDEBUG
 for(size_t ii=0; ii < flatSize; ++ii)
 {
@@ -576,10 +685,10 @@ for(size_t ii=0; ii < flatSize; ++ii)
 fprintf(stderr,"\n" );
 fprintf(stderr,"%f,", tempX[40]);
 fprintf(stderr,"%f,", tempX[80]);
-fprintf(stderr,"%f,", tempX[1853047522]);
+//fprintf(stderr,"%f,", tempX[1853047522]);
 fprintf(stderr,"%f,", tempY[40]);
 fprintf(stderr,"%f,", tempY[80]);
-fprintf(stderr,"%f,", tempY[1853047522]);
+//fprintf(stderr,"%f,", tempY[1853047522]);
 
 for(size_t ii=0; ii < flatSize; ++ii)
 {
@@ -588,6 +697,7 @@ for(size_t ii=0; ii < flatSize; ++ii)
 fprintf(stderr,"\n" );
 #endif
 
+/*
 if(sizeof(FloatType) == 4){
 vsSqrt(flatSize, (float *)tempX,(float *)tempX);
 }else{
@@ -599,11 +709,12 @@ vsSqrt(flatSize, (float *)tempY,(float *)tempY);
 }else{
 vdSqrt(flatSize, (double *)tempY,(double *)tempY);
 }
+*/
 
 pccLarge = _pearsonCorr;
 #pragma omp parallel for shared(flatSize, tempX, tempY, pccLarge) default(none)
   for(size_t j = 0; j < flatSize; ++j){
-       tempY[j] = pccLarge[j]/(tempX[j]*tempY[j]);
+       tempY[j] = pccLarge[j]/(sqrt(tempX[j])*sqrt(tempY[j]));
   }
 
   fprintf(stderr, "begin counts \n");
@@ -615,13 +726,13 @@ pccLarge = _pearsonCorr;
 fprintf(stderr,"Counts:\n" );
 fprintf(stderr,"%f,", tempX[40]);
 fprintf(stderr,"%f,", tempX[80]);
-fprintf(stderr,"%f",  tempX[1853047522]);
+//fprintf(stderr,"%f",  tempX[1853047522]);
 fprintf(stderr,"\n" );
 
 fprintf(stderr,"Original pearson:\n" );
 fprintf(stderr,"%f,", _pearsonCorr[40]);
 fprintf(stderr,"%f,", _pearsonCorr[80]);
-fprintf(stderr,"%f,", _pearsonCorr[1853047522]);
+//fprintf(stderr,"%f,", _pearsonCorr[1853047522]);
 
 for(size_t ii=0; ii < flatSize; ++ii)
 {
@@ -632,20 +743,17 @@ for(size_t ii=0; ii < flatSize; ++ii)
   //vsSqrt((MKL_INT)flatSize,(float *)tempY,(float *)tempY)(
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[40]);
   fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[80]);
-  fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[1853047522]);
+  //fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[1853047522]);
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[40]/tempY[40]);
   fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[80]/tempY[80]);
-  fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[1853047522]/tempY[1853047522]);
+  //fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[1853047522]/tempY[1853047522]);
 #endif
   fprintf(stderr, "Begin normalize\n");
   letime = getSysTime();
   fprintf(stderr, "Batch time: %f seconds\n", letime - ltime);
 
-  mtime = getSysTime();
  //The values below range from [0 2000] * 400 + 400 = max(800400)
-
-  mtime = getSysTime();
-  pccLarge = _pearsonCorr;
+ pccLarge = _pearsonCorr;
  const size_t vecSize = _vectorSize;
 
 /* #pragma vector aligned
@@ -661,54 +769,66 @@ for(size_t ii=0; ii < flatSize; ++ii)
  }
 */
 
-#pragma omp parallel for shared(flatSize, tempY, idxSave) default(none)
+/*int *idxx = &idxSave[0];
+#pragma omp parallel for shared(flatSize, tempY, idxSave, idxx) default(none)
 #pragma vector aligned
 #pragma simd
   for(size_t j = 0; j < flatSize; ++j){
-       idxSave[j] = tempY[j];
+       idxx[j] = tempY[j];
   }
+*/
 
 #define NEIGHBORS 
 #ifdef NEIGHBORS
 
-size_t numNeighbors = 100;
 ltime = getSysTime();
+
+ofstream myfile;
+myfile.open("neighbors.csv", std::ofstream::out |  std::ofstream::app);
 fprintf(stderr, "Begin neighbor sort\n");
-int c_array[5] = {};
+
+size_t pneighbor = min((size_t)numNeighbors,(size_t)_numVectors);
+size_t numVectors = _numVectors;
+
+#pragma omp parallel for shared( mSize, tempY, pneighbor, numVectors, neighborIdx, neighborVal) default(none)
 for(size_t j = 0; j < mSize;j++)
 {
-  size_t begin = j*_numVectors;
-  size_t end = j*_numVectors + _numVectors - 1;
-  
-  //int* c_array_begin = std::begin(&idxSave[0]);
-  //auto c_array_end = std::end((int *)&idxSave[0]);
-  //std::nth_element(c_array_begin, c_array_begin + numNeighbors, c_array_end);
+  size_t begin = j*numVectors;
+  size_t beginN = j*pneighbor;
+  //size_t end   = j*_numVectors + _numVectors - 1;
+  std::priority_queue<std::pair<int, int>> q; 
+ 
+  for (size_t ii = 0; ii < numVectors; ++ii) {
+    q.push(std::pair<int, int>(tempY[begin + ii], ii));
+  }
+
+  for(size_t ii = 0; ii < pneighbor; ii++){
+   neighborIdx[beginN+ii]  =  q.top().second;
+   neighborVal[beginN+ii] =(float)q.top().first/1000.0;
+    q.pop();   
+ }
+ q = priority_queue<std::pair<int,int>>();
+}
+
+for(size_t j = 0; j < mSize;j++)
+{
+  size_t begin = j*pneighbor;
+  for(size_t nn = 0; nn < pneighbor; nn++)
+   {
+     float printpcc = neighborVal[begin + nn];
+     int neighborid = neighborIdx[begin + nn];
+     if(printpcc > 1.01 || printpcc < -1.01)
+	continue;
+     myfile << std::setprecision(6) << (startVec[xx]+j) << " " << printpcc << " " << neighborid << "\n";
+   }
 }
 
 letime = getSysTime();
 fprintf(stderr, "Exit neighbor sort: %f seconds\n", letime - ltime);
-/*
-ofstream myfile;
-myfile.open("neighbors.csv", std::ofstream::out |  std::ofstream::app);
-
-int nPrint;
-double pcc;
-int count;
-
-size_t pneighbor = min(numNeighbors,_numVectors);
-for(size_t j=0; j < mSize; j++)
-{
-  size_t begin = j*_numVectors;
-  for(size_t nn = 0; nn < pneighbor; nn++)
-   {
-     float printpcc = tempY[begin+nn];
-     size_t neighborid = dstIdx[begin+nn];
-     myfile << std::setprecision(6) << j << " " << printpcc << " " << neighborid << "\n";
-   }
-}
 myfile.close(); 
-*/
 #endif
+
+mtime = getSysTime();
 
 #pragma omp parallel for shared(flatSize, tempX, tempY, idxSave, vecSize) default(none)
 #pragma vector aligned
@@ -716,7 +836,6 @@ myfile.close();
   for(size_t j = 0; j < flatSize; ++j){
        idxSave[j] =  (tempY[j] + 1000.0)*vecSize + tempX[j];
   }
-
  metime = getSysTime();
  fprintf(stderr, "Create index time: %f seconds\n", metime - mtime);
 
@@ -729,12 +848,12 @@ myfile.close();
  mtime = getSysTime();
  fprintf(stderr, "VSize: %lu \n", vSize );
  //#pragma omp parallel for reduction(+:vv) 
- 
-#pragma omp parallel for shared(flatSize, vSize, idxSave,v) default(none)
+size_t numtt = 16;//omp_get_num_threads(); 
+#pragma omp parallel for shared(flatSize, vSize, stderr,numtt, idxSave,vv) default(none)
 for(size_t j = 0; j < flatSize; ++j){
    size_t ixx =  idxSave[j]; 
-   const int tid = omp_get_thread_num(); 
-if((ixx > vSize) && (isinf(ixx)!= 0) ){
+   const size_t tid = omp_get_thread_num(); 
+if((ixx >= vSize) || (isinf(ixx)!= 0) ){
    /*fprintf(stderr, "[j:%d]ixx: %lu \n", j, ixx );
    fprintf(stderr, "pearsonCorr: %f \n", _pearsonCorr[j]);
    fprintf(stderr, "tempX: %f \n",tempX[j]);
@@ -744,7 +863,14 @@ if((ixx > vSize) && (isinf(ixx)!= 0) ){
  }
    //omp_set_lock(&lock[ixx]);
    //v[ixx]+=1;
-   v[tid*(vSize-1) + ixx]+=1;
+  size_t idxx = tid*(vSize) + ixx; 
+if(idxx >=(numtt*vSize))
+{
+fprintf(stderr, "num threads: %d tid: %lu \n", numtt, tid );
+//fprintf(stderr, "vv error index: %lu \n", idxx );
+continue;
+}
+vv[idxx]+=1;
    //omp_unset_lock(&lock[ixx]);
 }
 
@@ -756,7 +882,19 @@ etime = getSysTime();
 fprintf(stderr, "Overall time (%ld pairs): %f seconds\n", totalNumPairs,
 	etime - stime);
 
+int totalThreads = _numCPUThreads;
 
+fprintf(stderr, "Start thread reduction step totalThreads:%d \n", totalThreads);
+for(size_t ii = 0; ii < vSize; ii++)
+{
+vvOut[ii]=0;
+for(size_t jj = 0; jj < totalThreads; jj++)
+{
+  vvOut[ii] = vvOut[ii]+vv[jj*(vSize-1) + ii];
+}
+}
+
+fprintf(stderr, "Completed thread reduction step \n");
 #if 1
 ofstream myfile;
 myfile.open ("countTable.csv");
@@ -771,7 +909,10 @@ for(size_t ii=0; ii < vSize; ii++)
    double printpcc =double(floor(pcc)/1000.0);
    if(printpcc>1.0)
 	printpcc=1.0;
-   count  = v[ii];
+   
+   if(printpcc < -1.0)
+     printpcc = -1.0;
+  count  = vvOut[ii];
   
    if(count == 0)
     continue; 
