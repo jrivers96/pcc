@@ -279,30 +279,7 @@ void PearsonRMKL<FloatType>::runSingleThreaded() {
   }
 #endif
 }
-/*
-class MyIterator : public std::iterator<std::input_iterator_tag, int>
-{
-  int* p;
-public:
-  MyIterator(int* x) :p(x) {}
-  MyIterator(const MyIterator& mit) : p(mit.p) {}
-  MyIterator& operator++() {++p;return *this;}
-  MyIterator& operator--() {--p;return *this;}
-  MyIterator operator++(int) {MyIterator tmp(*this); operator++(); return tmp;}
-  MyIterator operator--(int) {MyIterator tmp(*this); operator--(); return tmp;}
-  int  operator-(const MyIterator& rhs)  {return p-rhs.p;}
-  int  operator+(const MyIterator& rhs)  {return p+rhs.p;}
-  MyIterator operator+(const int rhs)  {return p+rhs;}
-  MyIterator operator-(const int rhs)  {return p-rhs;}
-  
-  bool operator==(const MyIterator& rhs) {return p==rhs.p;}
-  //bool operator==(const MyIterator& rhs) {return p==rhs.p;}
-  bool operator!=(const MyIterator& rhs) {return p!=rhs.p;}
-  bool operator<=(const MyIterator& rhs) {return p<=rhs.p;}
-  bool operator<(const MyIterator& rhs) {return p<rhs.p;}
-  int& operator*() {return *p;}
-};
-*/
+
 /*
 namespace mmap_allocator_namespace
 {
@@ -408,6 +385,13 @@ size_t dataSize = (_numVectors * _vectorSizeAligned);
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+
+ FloatType *columnCount = (FloatType*) mm_malloc(
+      (ssize_t) _numVectors * sizeof(FloatType), 64);
+  if (!columnCount) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
  
 FloatType *tempX = (FloatType*) mm_malloc(
       (ssize_t) batchSize * sizeof(FloatType), 64);
@@ -447,6 +431,15 @@ for(size_t ii = 0; ii<dataSize; ii++){
 #pragma simd
 for(size_t ii = 0; ii<dataSize; ii++){
    countMat[ii] = (_vectors[ii]==0.0) ? 0.0:1.0;
+}
+#pragma vector aligned
+#pragma simd
+//for(size_t xx = 0;xx<_vectorSizeAligned;xx++){
+for(size_t xx = 0; xx<_numVectors; xx++){
+   columnCount[xx] = 0.0;	
+   for(size_t ii = 0; ii<_vectorSizeAligned; ii++){
+   		columnCount[xx] += countMat[ii+ xx*_vectorSizeAligned];
+}
 }
 
 size_t *idxSave = (size_t*) mm_malloc(
@@ -492,20 +485,6 @@ int *idxSave = (int*) mm_malloc(
   }
 */
 
-/*
-Ipp32s* idxSave =  (Ipp32s*) mm_malloc(
-      (ssize_t)(batchSize)*sizeof(Ipp32s),64);
-  if (NULL == idxSave) {
-    fprintf(stderr, "IPP Memory allocation failed\n");
-    exit(-1);
-  }
-*/
-/*
-Ipp32u* idxTmp =  (Ipp32u*) ippsMalloc_32u(
-      tartVec: 6000
-
-*/
-
 #ifdef DETAILDEBUG
 for(size_t ii=0; ii < dataSize; ++ii)
 {
@@ -515,25 +494,6 @@ fprintf(stderr,"\n" );
 #endif
 
 size_t vSize = (_vectorSize+1) * 2001;
-
-/*size_t vv[vSize]; 
-for(size_t ii = 0; ii < (num_threads * vSize); ii++)
-{
-  vv[ii]=0;
-}
-*/
-
-/*
-fprintf(stderr, "Allocating memory for vector locking mechanism NITEMS:%u  sizeof(lock):%u\n", vSize, sizeof(omp_lock_t));
-omp_lock_t *lock = (omp_lock_t*) mm_malloc(
-      (ssize_t) vSize * sizeof(omp_lock_t), 64);
-  if (!lock) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-}
- for (size_t ii=0; ii<vSize; ii++)
-        omp_init_lock(&(lock[ii]));
-*/
 
 /*enter the core computation*/
     if (_numCPUThreads < 1) {
@@ -557,6 +517,11 @@ size_t *vvOut = (size_t*) mm_malloc(
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+
+for(size_t ii=0;ii<(vSize);ii++)
+{
+ vvOut[ii]=0;
+}
 
 fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
 
@@ -589,9 +554,11 @@ fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
 #pragma vector aligned
 #pragma simd reduction(+:meanX)
                         for (int j = 0; j < _vectorSize; ++j) {
-                                meanX +=(double) vecX[j] * avg;
+                                //meanX +=(double) vecX[j] * avg;
+                                meanX +=(double) vecX[j];
+                        
                         }
-
+                       meanX = meanX/columnCount[row];
                         /*compute the variance*/
                         varX = 0;
 #pragma vector aligned
@@ -607,9 +574,12 @@ fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
 #pragma vector aligned
 #pragma simd
                         for (int j = 0; j < _vectorSize; ++j) {
-                                //x =(double) vecX[j] - meanX;
+                                x =(double) vecX[j] - meanX;
                                 //vecX[j] =(double) vecX[j] - meanX;
-                                //vecX[j] = x * varX;
+                               if(vecX[j]!=0.0){ 
+                               vecX[j] = x * varX;
+                               //vecX[j] = x ;
+                             }
                         }
                 }
         } /*#pragma omp paralle*/
@@ -657,7 +627,7 @@ for(int xx = 0; xx < numBatches; ++xx)
   vecCountMat = countMat + startVec[xx] * _vectorSizeAligned;
 
   //numerator
-  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1000, vecX, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
+  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1000.0, vecX, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
 
   fprintf(stderr, "numerator \n");
 
@@ -685,10 +655,8 @@ for(size_t ii=0; ii < flatSize; ++ii)
 fprintf(stderr,"\n" );
 fprintf(stderr,"%f,", tempX[40]);
 fprintf(stderr,"%f,", tempX[80]);
-//fprintf(stderr,"%f,", tempX[1853047522]);
 fprintf(stderr,"%f,", tempY[40]);
 fprintf(stderr,"%f,", tempY[80]);
-//fprintf(stderr,"%f,", tempY[1853047522]);
 
 for(size_t ii=0; ii < flatSize; ++ii)
 {
@@ -712,10 +680,32 @@ vdSqrt(flatSize, (double *)tempY,(double *)tempY);
 */
 
 pccLarge = _pearsonCorr;
+
+/*
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, pccLarge[ii]);
+}
+fprintf(stderr,"\n");
+fprintf(stderr,"\n");
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, 1.0/(sqrt(tempX[ii])*sqrt(tempY[ii])));
+}
+
+fprintf(stderr,"\n");
+fprintf(stderr,"\n");
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, pccLarge[ii]/(sqrt(tempX[ii])*sqrt(tempY[ii])));
+}
+*/
+
 #pragma omp parallel for shared(flatSize, tempX, tempY, pccLarge) default(none)
   for(size_t j = 0; j < flatSize; ++j){
        tempY[j] = pccLarge[j]/(sqrt(tempX[j])*sqrt(tempY[j]));
-  }
+       //tempY[j] *=1000.0;  
+}
 
   fprintf(stderr, "begin counts \n");
 
@@ -736,7 +726,7 @@ fprintf(stderr,"%f,", _pearsonCorr[80]);
 
 for(size_t ii=0; ii < flatSize; ++ii)
 {
-//fprintf(stderr,"%f,", _pearsonCorr[ii]);
+fprintf(stderr,"%f,", _pearsonCorr[ii]);
 }
   fprintf(stderr,"\n" );
   fprintf(stderr, "counts \n");
@@ -751,12 +741,23 @@ for(size_t ii=0; ii < flatSize; ++ii)
   fprintf(stderr, "Begin normalize\n");
   letime = getSysTime();
   fprintf(stderr, "Batch time: %f seconds\n", letime - ltime);
+/*
+for(size_t ii=0; ii < _numVectors; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, _pearsonCorr[ii]);
+}
 
+for(size_t ii=0; ii < _numVectors; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, tempY[ii]);
+}
+*/
  //The values below range from [0 2000] * 400 + 400 = max(800400)
  pccLarge = _pearsonCorr;
  const size_t vecSize = _vectorSize;
 
-/* #pragma vector aligned
+/* 
+  #pragma vector aligned
   #pragma simd
   for(size_t j = 0; j < flatSize; ++j){
        pccLarge[j] =  (pccLarge[j]/tempY[j])*1000.0 + 1000.0;
@@ -790,36 +791,52 @@ fprintf(stderr, "Begin neighbor sort\n");
 size_t pneighbor = min((size_t)numNeighbors,(size_t)_numVectors);
 size_t numVectors = _numVectors;
 
-#pragma omp parallel for shared( mSize, tempY, pneighbor, numVectors, neighborIdx, neighborVal) default(none)
+#pragma omp parallel for shared( mSize, tempY,tempX, pneighbor, numVectors, neighborIdx, neighborVal,stderr) default(none)
 for(size_t j = 0; j < mSize;j++)
 {
-  size_t begin = j*numVectors;
+  size_t begin  = j*numVectors;
   size_t beginN = j*pneighbor;
-  //size_t end   = j*_numVectors + _numVectors - 1;
+  //size_t end = j*_numVectors + _numVectors - 1;
   std::priority_queue<std::pair<int, int>> q; 
  
   for (size_t ii = 0; ii < numVectors; ++ii) {
     q.push(std::pair<int, int>(tempY[begin + ii], ii));
   }
-
+  size_t cc = 0;
   for(size_t ii = 0; ii < pneighbor; ii++){
+   size_t nnid =  q.top().second;
+   size_t countmatch = tempX[begin + nnid]; 
+   while((countmatch < 5) && (cc < numVectors) )
+   {
+    q.pop();
+    nnid =  q.top().second;
+    countmatch = tempX[begin + nnid]; 
+    cc+=1;
+    if(cc>numVectors)
+    {
+     fprintf(stderr, "cc:%u\n",cc);
+    }
+   }
+   neighborVal[beginN+ii]  =(float)q.top().first/1000.0;
    neighborIdx[beginN+ii]  =  q.top().second;
-   neighborVal[beginN+ii] =(float)q.top().first/1000.0;
-    q.pop();   
+    q.pop(); 
  }
  q = priority_queue<std::pair<int,int>>();
 }
 
 for(size_t j = 0; j < mSize;j++)
 {
+  
+  size_t beginO = j*numVectors;
   size_t begin = j*pneighbor;
   for(size_t nn = 0; nn < pneighbor; nn++)
    {
      float printpcc = neighborVal[begin + nn];
-     int neighborid = neighborIdx[begin + nn];
+     size_t neighborid   = neighborIdx[begin + nn];
+     size_t printcount   = tempX[beginO + neighborid];
      if(printpcc > 1.01 || printpcc < -1.01)
 	continue;
-     myfile << std::setprecision(6) << (startVec[xx]+j) << " " << printpcc << " " << neighborid << "\n";
+     myfile << std::setprecision(6) << (startVec[xx]+j) << " " << printpcc << " " << neighborid << " " << printcount << "\n";
    }
 }
 
@@ -853,7 +870,7 @@ size_t numtt = 16;//omp_get_num_threads();
 for(size_t j = 0; j < flatSize; ++j){
    size_t ixx =  idxSave[j]; 
    const size_t tid = omp_get_thread_num(); 
-if((ixx >= vSize) || (isinf(ixx)!= 0) ){
+if((ixx >= vSize) || (isinf(ixx)!= 0) || (isnan(ixx)!=0) ){
    /*fprintf(stderr, "[j:%d]ixx: %lu \n", j, ixx );
    fprintf(stderr, "pearsonCorr: %f \n", _pearsonCorr[j]);
    fprintf(stderr, "tempX: %f \n",tempX[j]);
@@ -861,8 +878,6 @@ if((ixx >= vSize) || (isinf(ixx)!= 0) ){
    */
    continue;
  }
-   //omp_set_lock(&lock[ixx]);
-   //v[ixx]+=1;
   size_t idxx = tid*(vSize) + ixx; 
 if(idxx >=(numtt*vSize))
 {
@@ -871,7 +886,6 @@ fprintf(stderr, "num threads: %d tid: %lu \n", numtt, tid );
 continue;
 }
 vv[idxx]+=1;
-   //omp_unset_lock(&lock[ixx]);
 }
 
  metime = getSysTime();
@@ -890,7 +904,9 @@ for(size_t ii = 0; ii < vSize; ii++)
 vvOut[ii]=0;
 for(size_t jj = 0; jj < totalThreads; jj++)
 {
-  vvOut[ii] = vvOut[ii]+vv[jj*(vSize-1) + ii];
+  //vvOut[ii] = vvOut[ii] + vv[jj*(vSize-1) + ii];
+  vvOut[ii] = vvOut[ii] + vv[jj*(vSize) + ii];
+
 }
 }
 
@@ -995,7 +1011,7 @@ void PearsonRMKL<FloatType>::runSingleXeonPhi() {
 #pragma vector aligned
 #pragma simd reduction(+:meanX)
 				for (int j = 0; j < _vectorSize; ++j) {
-					meanX += vecX[j] * avg;
+	//				meanX += vecX[j] * 1.0/columnCount[j];
 				}
 
 				/*compute the variance*/
@@ -1013,7 +1029,8 @@ void PearsonRMKL<FloatType>::runSingleXeonPhi() {
 #pragma simd
 				for(int j = 0; j < _vectorSize; ++j) {
 					x = vecX[j] - meanX;
-					vecX[j] = x * varX;
+					//vecX[j] = x * varX;
+					vecX[j] = x;
 				}
 			}
 		}
