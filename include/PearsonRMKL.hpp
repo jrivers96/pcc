@@ -778,7 +778,7 @@ fprintf(stderr, "Begin neighbor sort\n");
 size_t pneighbor = min((size_t)numNeighbors,(size_t)_numVectors);
 size_t numVectors = _numVectors;
 
-#pragma omp parallel for shared( mSize, tempY,tempX, pneighbor, numVectors, neighborIdx, neighborVal,stderr) default(none)
+#pragma omp parallel for shared( mSize, tempY,totCounts, pneighbor, numVectors, neighborIdx, neighborVal,stderr) default(none)
 for(size_t j = 0; j < mSize;j++)
 {
   size_t begin  = j*numVectors;
@@ -797,7 +797,7 @@ for(size_t j = 0; j < mSize;j++)
    {
     q.pop();
     nnid =  q.top().second;
-    countmatch = tempX[begin + nnid]; 
+    countmatch = totCounts[begin + nnid]; 
     cc+=1;
     if(cc>numVectors)
     {
@@ -838,9 +838,9 @@ mtime = getSysTime();
 //#pragma vector aligned
 //#pragma simd
  
-#pragma omp parallel for shared(flatSize, tempX, tempY, idxSave, vecSize) default(none)
+#pragma omp parallel for shared(flatSize, totCounts, tempY, idxSave, vecSize) default(none)
  for(size_t j = 0; j < flatSize; ++j){
-       idxSave[j] =  (tempY[j] +(FloatType)1000.0)*vecSize + tempX[j];
+       idxSave[j] =  (tempY[j] +(FloatType)1000.0)*vecSize + totCounts[j];
   }
  metime = getSysTime();
  fprintf(stderr, "Create index time: %f seconds\n", metime - mtime);
