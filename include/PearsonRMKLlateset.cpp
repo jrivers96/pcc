@@ -341,7 +341,7 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
   }
  */
 
- int desiredBatch = 250;
+ int desiredBatch = 1000;
  ssize_t numBatches = ceil((double)_numVectors / (double)desiredBatch);
  fprintf(stderr, "numVectors: %u \n", _numVectors);
  fprintf(stderr, "desiredBatch: %u \n", desiredBatch);
@@ -386,21 +386,13 @@ size_t dataSize = (_numVectors * _vectorSizeAligned);
     exit(-1);
   }
 
-/*FloatType *columnMeans = (FloatType*) mm_malloc(
+ FloatType *columnCount = (FloatType*) mm_malloc(
       (ssize_t) _numVectors * sizeof(FloatType), 64);
-  if (!columnMeans) {
+  if (!columnCount) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-*/
-
-FloatType *totCounts = (FloatType*) mm_malloc(
-      (ssize_t) batchSize * sizeof(FloatType), 64);
-  if (!totCounts) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-
+ 
 FloatType *tempX = (FloatType*) mm_malloc(
       (ssize_t) batchSize * sizeof(FloatType), 64);
   if (!tempX) {
@@ -414,28 +406,6 @@ FloatType *tempY = (FloatType*) mm_malloc(
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-
-FloatType *meanX = (FloatType*) mm_malloc(
-      (ssize_t) batchSize * sizeof(FloatType), 64);
-  if (!meanX) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-
-FloatType *meanY = (FloatType*) mm_malloc(
-      (ssize_t) batchSize * sizeof(FloatType), 64);
-  if (!meanY) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-
-FloatType *meanXY = (FloatType*) mm_malloc(
-      (ssize_t) batchSize * sizeof(FloatType), 64);
-  if (!meanXY) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
-
 
  FloatType *squared = (FloatType*) mm_malloc(
       (ssize_t) (dataSize) * sizeof(FloatType), 64);
@@ -462,17 +432,17 @@ for(size_t ii = 0; ii<dataSize; ii++){
 for(size_t ii = 0; ii<dataSize; ii++){
    countMat[ii] = (_vectors[ii]==0.0) ? 0.0:1.0;
 }
-/*
+
 #pragma vector aligned
 #pragma simd
 //for(size_t xx = 0;xx<_vectorSizeAligned;xx++){
 for(size_t xx = 0; xx<_numVectors; xx++){
-   colCount[xx] = 0.0;	
+   columnCount[xx] = 0.0;	
    for(size_t ii = 0; ii<_vectorSizeAligned; ii++){
-   	colCount[xx] += countMat[ii+ xx*_vectorSizeAligned];
+   		columnCount[xx] += countMat[ii+ xx*_vectorSizeAligned];
 }
 }
-*/
+
 size_t *idxSave = (size_t*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(size_t), 64);
   if (!idxSave) {
@@ -494,6 +464,27 @@ size_t *neighborIdx = (size_t*) mm_malloc(
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
+
+//std::vector<int, mmap_allocator<int> > idxSave(batchSize, 0, mmap_allocator<int>());
+//std::vector<int> idxSave(batchSize,0);
+//std::priority_queue<std::pair<int, int>> q;
+/*
+int *idxSave = (int*) mm_malloc(
+      (ssize_t) (batchSize) * sizeof(int), 64);
+  if (!idxSave) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+*/
+
+/* 
+ int *dstIdx = (int*) mm_malloc(
+      (ssize_t) (batchSize) * sizeof(int), 64);
+  if (!dstIdx) {
+    fprintf(stderr, "Memory allocation failed\n");
+    exit(-1);
+  }
+*/
 
 #ifdef DETAILDEBUG
 for(size_t ii=0; ii < dataSize; ++ii)
@@ -534,6 +525,66 @@ for(size_t ii=0;ii<(vSize);ii++)
 }
 
 fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
+
+#pragma omp parallel reduction(+:totalNumPairs)
+        {
+                ssize_t chunkSize;
+                int row, col;
+                int loRowRange, hiRowRange;
+                int loColRange, hiColRange;
+                int startColPerRow, endColPerRow;
+                int rowStart, rowEnd, colStart, colEnd;
+                ssize_t numPairsProcessed = 0;
+                double meanX, varX, x, prod;
+                FloatType* __restrict__ vecX;
+                FloatType* __restrict__ vecY;
+                const int tid = omp_get_thread_num();
+                const int nthreads = omp_get_num_threads();
+
+    /*compute mean and variance*/
+                chunkSize = (_numVectors + nthreads - 1) / nthreads;
+                loRowRange = tid * chunkSize;
+                hiRowRange = min(_numVectors, (tid + 1) * (int) chunkSize) - 1;
+
+    vecX = _vectors + loRowRange * _vectorSizeAligned;
+                for (row = loRowRange; row <= hiRowRange; ++row, vecX +=
+                                _vectorSizeAligned) {
+
+                        /*compute the mean*/
+                        meanX = 0;
+#pragma vector aligned
+#pragma simd reduction(+:meanX)
+                        for (int j = 0; j < _vectorSize; ++j) {
+                                //meanX +=(double) vecX[j] * avg;
+                                meanX +=(double) vecX[j];
+                        
+                        }
+                       meanX = meanX/columnCount[row];
+                        /*compute the variance*/
+                        varX = 0;
+#pragma vector aligned
+#pragma simd reduction(+:varX)
+                        for (int j = 0; j < _vectorSize; ++j) {
+                                x = (double)vecX[j] - meanX;
+                                varX += x * x;
+                        }
+                        varX = 1.0 / sqrt(varX);
+
+                        fprintf(stderr, "row: %d Meanx: %f\n", row,meanX);
+                        /*normalize the data*/
+
+#pragma vector aligned
+#pragma simd
+                        for (int j = 0; j < _vectorSize; ++j) {
+                                x =(double) vecX[j] -(meanX);
+                                //vecX[j] =(double) vecX[j] - meanX;
+                               if(vecX[j]!=0.0){ 
+                               //vecX[j] = x * varX;
+                               //vecX[j] = x ;
+                             }
+                        }
+                }
+        } /*#pragma omp paralle*/
 
 /*invoke the Intel MKL kernel: multithreads*/
 //mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, _numVectors, _numVectors, _vectorSize, 1, _vectors, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
@@ -578,66 +629,12 @@ for(int xx = 0; xx < numBatches; ++xx)
   vecCountMat = countMat + startVec[xx] * _vectorSizeAligned;
 
   //numerator
-  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecX, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
-
-  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecX, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, tempX, _numVectors);
- 
-  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, tempY, _numVectors);
-
-  //generate the counts
-  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, totCounts, _numVectors);
-  
-  size_t flatSize =  mSize*_numVectors;
- 
-  fprintf(stderr, "begin element by element:%u \n", flatSize);
- 
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)tempX,(float *)tempX, (float*)meanX);
-  }else{
-   vdMul(flatSize, (double *)tempX,(double *)tempX, (double*)meanX);
-  }
-
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)tempY,(float *)tempY, (float*)meanY);
-  }else{
-   vdMul(flatSize, (double *)tempY,(double *)tempY, (double*)meanY);
-  }
-
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)tempX,(float *)tempY, (float*)meanXY);
-  }else{
-   vdMul(flatSize, (double *)tempX,(double *)tempY, (double*)meanXY);
-  }
- 
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)totCounts,(float *)_pearsonCorr, (float *)_pearsonCorr);
-  }else{
-   vdMul(flatSize, (double *)totCounts,(double *)_pearsonCorr, (double*)_pearsonCorr);
-  }
-
- if(sizeof(FloatType) == 4){
-   vsSub(flatSize, (float *) _pearsonCorr, (float *)meanXY,(float *)_pearsonCorr);
-  }else{
-   vdSub(flatSize, (double *)_pearsonCorr, (double *)meanXY,(double *)_pearsonCorr);
-  }
+  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1000.0, vecX, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
 
   fprintf(stderr, "numerator \n");
 
   //left denominator
   mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecXSquared, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, tempX, _numVectors);
-
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)tempX, (float *)totCounts,(float *)tempX);
-  }else{
-   vdMul(flatSize, (double *)tempX, (double *)totCounts,(double *)tempX);
-  }
-
- if(sizeof(FloatType) == 4){
-   vsSub(flatSize, (float *)tempX, (float *)meanX,(float *)tempX);
-  }else{
-   vdSub(flatSize, (double *)tempX, (double *)meanX,(double *)tempX);
-  }
-
 
   fprintf(stderr, "left den \n");
 
@@ -645,26 +642,32 @@ for(int xx = 0; xx < numBatches; ++xx)
   mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, squared, _vectorSizeAligned, 0, tempY, _numVectors);
   fprintf(stderr, "right den \n");
 
- if(sizeof(FloatType) == 4){
-   vsMul(flatSize, (float *)tempY, (float *)totCounts,(float *)tempY);
-  }else{
-   vdMul(flatSize, (double *)tempY, (double *)totCounts,(double *)tempY);
-  }
-
- if(sizeof(FloatType) == 4){
-   vsSub(flatSize, (float *)tempY, (float *)meanY,(float *)tempY);
-  }else{
-   vdSub(flatSize, (double *)tempY, (double *)meanY,(double *)tempY);
-  }
-
+  size_t flatSize =  mSize*_numVectors;
   size_t N;
   long ix;
   //combine left and right denominator
 
 //#define DETAILDEBUG
 #ifdef DETAILDEBUG
+for(size_t ii=0; ii < flatSize; ++ii)
+{
+//fprintf(stderr,"%f,", tempX[ii]);
+}
+
+fprintf(stderr,"\n" );
+fprintf(stderr,"%f,", tempX[40]);
+fprintf(stderr,"%f,", tempX[80]);
+fprintf(stderr,"%f,", tempY[40]);
+fprintf(stderr,"%f,", tempY[80]);
+
+for(size_t ii=0; ii < flatSize; ++ii)
+{
+//fprintf(stderr,"%f,", tempY[ii]);
+}
+fprintf(stderr,"\n" );
 #endif
 
+/*
 if(sizeof(FloatType) == 4){
 vsSqrt(flatSize, (float *)tempX,(float *)tempX);
 }else{
@@ -676,28 +679,40 @@ vsSqrt(flatSize, (float *)tempY,(float *)tempY);
 }else{
 vdSqrt(flatSize, (double *)tempY,(double *)tempY);
 }
+*/
 
 pccLarge = _pearsonCorr;
 
-for(size_t ii=0; ii < 2; ++ii)
-{
-  fprintf(stderr,"tempX:%f,", tempX[ii]);
-  fprintf(stderr,"tempY:%f,", tempY[ii]);
 
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, pccLarge[ii]);
+}
+fprintf(stderr,"\n");
+fprintf(stderr,"\n");
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, 1.0/(sqrt(tempX[ii])*sqrt(tempY[ii])));
 }
 
-fprintf(stderr, "begin counts \n");
+fprintf(stderr,"\n");
+fprintf(stderr,"\n");
+for(size_t ii=0; ii < 10; ++ii)
+{
+fprintf(stderr,"%d:%f,", ii, pccLarge[ii]/(sqrt(tempX[ii])*sqrt(tempY[ii])));
+}
+
+
 #pragma omp parallel for shared(flatSize, tempX, tempY, pccLarge) default(none)
   for(size_t j = 0; j < flatSize; ++j){
-       tempY[j] = pccLarge[j]/((tempX[j])*(tempY[j]));
-       tempY[j] *=1000.0;  
+       tempY[j] = pccLarge[j]/(sqrt(tempX[j])*sqrt(tempY[j]));
+       //tempY[j] *=1000.0;  
 }
 
-for(size_t ii=0; ii < 2; ++ii)
-{
-  fprintf(stderr,"Full PCC:%f,", tempY[ii]);
-}
+  fprintf(stderr, "begin counts \n");
 
+  //generate the counts
+  mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, tempX, _numVectors);
 
 #ifdef DETAILDEBUG
 fprintf(stderr,"Counts:\n" );
@@ -792,7 +807,7 @@ for(size_t j = 0; j < mSize;j++)
   size_t cc = 0;
   for(size_t ii = 0; ii < pneighbor; ii++){
    size_t nnid =  q.top().second;
-   size_t countmatch = totCounts[begin + nnid]; 
+   size_t countmatch = tempX[begin + nnid]; 
    while((countmatch < 5) && (cc < numVectors) )
    {
     q.pop();
@@ -820,7 +835,7 @@ for(size_t j = 0; j < mSize;j++)
    {
      FloatType printpcc = neighborVal[begin + nn];
      size_t neighborid   = neighborIdx[begin + nn];
-     size_t printcount   = totCounts[beginO + neighborid];
+     size_t printcount   = tempX[beginO + neighborid];
      if(printpcc > 1.01 || printpcc < -1.01)
 	continue;
      myfile << std::setprecision(6) << (startVec[xx]+j) << " " << (float)printpcc << " " << neighborid << " " << printcount << "\n";
