@@ -69,8 +69,9 @@ template<typename FloatType>
 class PearsonRMKL {
 public:
 	PearsonRMKL(int numVectors, int vectorSize, int numCPUThreads,
-			int numMICThreads, int micIndex, int rank, int numProcs);
-	~PearsonRMKL();
+		    int numMICThreads, int micIndex, int rank, int numProcs, size_t numNeighbors, int minCount, float minPCC, float maxPCC, int batchSize);
+	
+        ~PearsonRMKL();
 
 	inline FloatType* getVectors() {
 		return _vectors;
@@ -119,6 +120,12 @@ private:
 	int _rank;			/*process rank*/
 	int _numProcs;	/*number of MPI processes*/
 	FloatType* _pearsonCorr; /*pearson correlation matrix*/
+        
+        int _numNeighbors;
+        int _minCount;
+        FloatType _minPCC;
+        FloatType _maxPCC;
+        int _batchSize;
 
 #ifdef WITH_PHI
   __attribute__((target(mic)))
@@ -162,7 +169,7 @@ __attribute__((target(mic)))
 
 template<typename FloatType>
 PearsonRMKL<FloatType>::PearsonRMKL(int numVectors, int vectorSize, int numCPUThreads,
-	int numMICThreads, int micIndex, int rank, int numProcs) {
+	int numMICThreads, int micIndex, int rank, int numProcs, size_t numNeighbors, int minCount, float minPCC, float maxPCC, int batchSize) {
 	int alignment = 64 / sizeof(FloatType);	/*align to 64 byte boundary*/
 	_numVectors = numVectors;
 	_vectorSize = vectorSize;
@@ -172,8 +179,13 @@ PearsonRMKL<FloatType>::PearsonRMKL(int numVectors, int vectorSize, int numCPUTh
 	_micIndex = micIndex; /*index of mic device*/
 	_rank = rank;
 	_numProcs = numProcs;
-
-	/*allocate space*/
+        _numNeighbors = numNeighbors;
+        _minCount = minCount;
+        _minPCC = minPCC;
+        _maxPCC = maxPCC;
+        _batchSize = batchSize;
+	
+        /*allocate space*/
 	_pearsonCorr = NULL;
 
 	/*align each vector*/
@@ -332,16 +344,9 @@ void PearsonRMKL<FloatType>::runMultiThreaded() {
   /*record system time*/
   stime = getSysTime();
 
-  /*allocate space*/
-  /*_pearsonCorr = (FloatType*) mm_malloc(
-      (ssize_t) _numVectors * _numVectors * sizeof(FloatType), 64);
-  if (!_pearsonCorr) {
-    fprintf(stderr, "Memory allocation failed\n");
-    exit(-1);
-  }
- */
-
- int desiredBatch = 250;
+ //int desiredBatch = 250;
+ int desiredBatch = _batchSize;
+ 
  ssize_t numBatches = ceil((double)_numVectors / (double)desiredBatch);
  fprintf(stderr, "numVectors: %u \n", _numVectors);
  fprintf(stderr, "desiredBatch: %u \n", desiredBatch);
@@ -436,7 +441,6 @@ FloatType *meanXY = (FloatType*) mm_malloc(
     exit(-1);
   }
 
-
  FloatType *squared = (FloatType*) mm_malloc(
       (ssize_t) (dataSize) * sizeof(FloatType), 64);
   if (!squared) {
@@ -462,6 +466,7 @@ for(size_t ii = 0; ii<dataSize; ii++){
 for(size_t ii = 0; ii<dataSize; ii++){
    countMat[ii] = (_vectors[ii]==0.0) ? 0.0:1.0;
 }
+
 /*
 #pragma vector aligned
 #pragma simd
@@ -473,14 +478,16 @@ for(size_t xx = 0; xx<_numVectors; xx++){
 }
 }
 */
+
 size_t *idxSave = (size_t*) mm_malloc(
       (ssize_t) (batchSize) * sizeof(size_t), 64);
   if (!idxSave) {
     fprintf(stderr, "Memory allocation failed\n");
     exit(-1);
   }
-size_t numNeighbors = 100;
+size_t numNeighbors = _numNeighbors;
 size_t neighborSize = numNeighbors*desiredBatch;
+ 
 FloatType *neighborVal = (FloatType*) mm_malloc(
       (ssize_t) (neighborSize) * sizeof(FloatType), 64);
   if (!neighborVal) {
@@ -534,7 +541,6 @@ for(size_t ii=0;ii<(vSize);ii++)
 }
 
 fprintf(stderr,"num_threads:%d\n", _numCPUThreads );
-
 /*invoke the Intel MKL kernel: multithreads*/
 //mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, _numVectors, _numVectors, _vectorSize, 1, _vectors, _vectorSizeAligned, _vectors, _vectorSizeAligned, 0, _pearsonCorr, _numVectors);
 
@@ -552,6 +558,7 @@ mm_free(power);
 pltime = getSysTime();
 fprintf(stderr, "vdPow: %f seconds\n", pltime - ptime);
 
+//pointers to be used to segment the computations
 FloatType* __restrict__ vecX;
 FloatType* __restrict__ vecXSquared;
 FloatType* __restrict__ vecCountMat;
@@ -588,9 +595,9 @@ for(int xx = 0; xx < numBatches; ++xx)
   mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, countMat, _vectorSizeAligned, 0, totCounts, _numVectors);
   
   size_t flatSize =  mSize*_numVectors;
- 
   fprintf(stderr, "begin element by element:%u \n", flatSize);
  
+ //calculate the means on the fly in an element by element fashion
  if(sizeof(FloatType) == 4){
    vsMul(flatSize, (float *)tempX,(float *)tempX, (float*)meanX);
   }else{
@@ -638,20 +645,20 @@ for(int xx = 0; xx < numBatches; ++xx)
    vdSub(flatSize, (double *)tempX, (double *)meanX,(double *)tempX);
   }
 
-
   fprintf(stderr, "left den \n");
 
   //right denominator
   mygemm<FloatType>(CblasRowMajor, CblasNoTrans, CblasTrans, mSize, _numVectors, _vectorSize, 1, vecCountMat, _vectorSizeAligned, squared, _vectorSizeAligned, 0, tempY, _numVectors);
+  
   fprintf(stderr, "right den \n");
 
- if(sizeof(FloatType) == 4){
+  if(sizeof(FloatType) == 4){
    vsMul(flatSize, (float *)tempY, (float *)totCounts,(float *)tempY);
   }else{
    vdMul(flatSize, (double *)tempY, (double *)totCounts,(double *)tempY);
   }
 
- if(sizeof(FloatType) == 4){
+  if(sizeof(FloatType) == 4){
    vsSub(flatSize, (float *)tempY, (float *)meanY,(float *)tempY);
   }else{
    vdSub(flatSize, (double *)tempY, (double *)meanY,(double *)tempY);
@@ -660,10 +667,6 @@ for(int xx = 0; xx < numBatches; ++xx)
   size_t N;
   long ix;
   //combine left and right denominator
-
-//#define DETAILDEBUG
-#ifdef DETAILDEBUG
-#endif
 
 if(sizeof(FloatType) == 4){
 vsSqrt(flatSize, (float *)tempX,(float *)tempX);
@@ -679,13 +682,6 @@ vdSqrt(flatSize, (double *)tempY,(double *)tempY);
 
 pccLarge = _pearsonCorr;
 
-for(size_t ii=0; ii < 2; ++ii)
-{
-  fprintf(stderr,"tempX:%f,", tempX[ii]);
-  fprintf(stderr,"tempY:%f,", tempY[ii]);
-
-}
-
 fprintf(stderr, "begin counts \n");
 #pragma omp parallel for shared(flatSize, tempX, tempY, pccLarge) default(none)
   for(size_t j = 0; j < flatSize; ++j){
@@ -693,38 +689,41 @@ fprintf(stderr, "begin counts \n");
        tempY[j] *=1000.0;  
 }
 
-for(size_t ii=0; ii < 2; ++ii)
-{
-  fprintf(stderr,"Full PCC:%f,", tempY[ii]);
-}
-
-
+#define DETAILDEBUG
 #ifdef DETAILDEBUG
-fprintf(stderr,"Counts:\n" );
-fprintf(stderr,"%f,", tempX[40]);
-fprintf(stderr,"%f,", tempX[80]);
-//fprintf(stderr,"%f",  tempX[1853047522]);
-fprintf(stderr,"\n" );
-
-fprintf(stderr,"Original pearson:\n" );
-fprintf(stderr,"%f,", _pearsonCorr[40]);
-fprintf(stderr,"%f,", _pearsonCorr[80]);
-//fprintf(stderr,"%f,", _pearsonCorr[1853047522]);
-
-for(size_t ii=0; ii < flatSize; ++ii)
-{
-fprintf(stderr,"%f,", _pearsonCorr[ii]);
-}
+  fprintf(stderr, "PCC diagonal \n");
+  for(size_t ii=0; ii < mSize; ++ii)
+  {
+   size_t begin  = ii*_numVectors;
+   fprintf(stderr,"%10.12f,", tempY[begin + ii]);
+  }
   fprintf(stderr,"\n" );
-  fprintf(stderr, "counts \n");
-  //vsSqrt((MKL_INT)flatSize,(float *)tempY,(float *)tempY)(
-  fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[40]);
-  fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[80]);
-  //fprintf(stderr, "NORMALIZE FACTOR: %f\n", tempY[1853047522]);
-  fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[40]/tempY[40]);
-  fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[80]/tempY[80]);
-  //fprintf(stderr, "AFTER NORMALIZE: %f\n", _pearsonCorr[1853047522]/tempY[1853047522]);
+
+  fprintf(stderr, "PCC diagonal (int) \n");
+  for(size_t ii=0; ii < mSize; ++ii)
+  {
+   size_t begin  = ii*_numVectors;
+   fprintf(stderr,"%d,", (int)round(tempY[begin + ii]));
+  }
+  fprintf(stderr,"\n" );
+
+  fprintf(stderr, "PCC diagonal (long) \n");
+  for(size_t ii=0; ii < mSize; ++ii)
+  {
+   size_t begin  = ii*_numVectors;
+   fprintf(stderr,"%u,", (unsigned int)tempY[begin + ii]);
+  }
+  fprintf(stderr,"\n" );
+
+  fprintf(stderr, "PCC diagonal (long) \n");
+  for(size_t ii=0; ii < mSize; ++ii)
+  {
+   size_t begin  = ii*_numVectors;
+   fprintf(stderr,"%u,", (unsigned int)tempY[begin + ii]);
+  }
+  fprintf(stderr,"\n" );
 #endif
+  
   fprintf(stderr, "Begin normalize\n");
   letime = getSysTime();
   fprintf(stderr, "Batch time: %f seconds\n", letime - ltime);
@@ -743,29 +742,6 @@ fprintf(stderr,"%d:%f,", ii, tempY[ii]);
  pccLarge = _pearsonCorr;
  const size_t vecSize = _vectorSize;
 
-/* 
-  #pragma vector aligned
-  #pragma simd
-  for(size_t j = 0; j < flatSize; ++j){
-       pccLarge[j] =  (pccLarge[j]/tempY[j])*1000.0 + 1000.0;
-  }
-
- #pragma vector aligned
- #pragma simd
-  for(size_t j = 0; j < flatSize; ++j){
-       idxSave[j] = _pearsonCorr[j] * vecSize + tempX[j];
- }
-*/
-
-/*int *idxx = &idxSave[0];
-#pragma omp parallel for shared(flatSize, tempY, idxSave, idxx) default(none)
-#pragma vector aligned
-#pragma simd
-  for(size_t j = 0; j < flatSize; ++j){
-       idxx[j] = tempY[j];
-  }
-*/
-
 #define NEIGHBORS 
 #ifdef NEIGHBORS
 
@@ -777,37 +753,41 @@ fprintf(stderr, "Begin neighbor sort\n");
 
 size_t pneighbor = min((size_t)numNeighbors,(size_t)_numVectors);
 size_t numVectors = _numVectors;
+//this has beeen run with min counts of 5
+size_t minCount = _minCount;
+FloatType maxPCC = 1000.0*_maxPCC + std::numeric_limits<FloatType>::epsilon();;
+FloatType minPCC = 1000.0*_minPCC - std::numeric_limits<FloatType>::epsilon();
 
-#pragma omp parallel for shared( mSize, tempY,totCounts, pneighbor, numVectors, neighborIdx, neighborVal,stderr) default(none)
+#pragma omp parallel for shared( mSize, tempY, totCounts, pneighbor, numVectors, neighborIdx, neighborVal, minCount, maxPCC, minPCC, stderr) default(none)
 for(size_t j = 0; j < mSize;j++)
 {
   size_t begin  = j*numVectors;
   size_t beginN = j*pneighbor;
-  //size_t end = j*_numVectors + _numVectors - 1;
+  
   std::priority_queue<std::pair<int, int>> q; 
- 
+  
+  //push into a priority queue and filter for the values that the user
+  // does not want reported. 
   for (size_t ii = 0; ii < numVectors; ++ii) {
-    q.push(std::pair<int, int>((int)tempY[begin + ii], ii));
+   if((minCount <= totCounts[begin + ii]) && (minPCC <= tempY[begin + ii]) && (maxPCC >= tempY[begin + ii]) ){
+   q.push(std::pair<int, int>((int)round(tempY[begin + ii]), ii));
+   }  
   }
   size_t cc = 0;
   for(size_t ii = 0; ii < pneighbor; ii++){
-   size_t nnid =  q.top().second;
-   size_t countmatch = totCounts[begin + nnid]; 
-   while((countmatch < 5) && (cc < numVectors) )
-   {
-    q.pop();
-    nnid =  q.top().second;
-    countmatch = totCounts[begin + nnid]; 
-    cc+=1;
-    if(cc>numVectors)
-    {
-     fprintf(stderr, "cc:%u\n",cc);
-    }
-   }
-   neighborVal[beginN+ii]  =(FloatType)q.top().first/((FloatType)1000.0);
-   neighborIdx[beginN+ii]  =  q.top().second;
+  if(!q.empty()){
+    //size_t nnid =  q.top().second;
+    //size_t countmatch = totCounts[begin + nnid]; 
+    neighborVal[beginN+ii]  =  (double)q.top().first/((double)1000.0);
+    //neighborVal[beginN+ii]  =  (FloatType)q.top().first;
+    neighborIdx[beginN+ii]  =  q.top().second;
     q.pop(); 
+  }else{
+    neighborVal[beginN+ii]  = NAN; 
+    neighborIdx[beginN+ii]  = NAN;
+  }
  }
+ //clear the priority queue
  q = priority_queue<std::pair<int,int>>();
 }
 
@@ -815,15 +795,18 @@ for(size_t j = 0; j < mSize;j++)
 {
   
   size_t beginO = j*numVectors;
-  size_t begin = j*pneighbor;
+  size_t begin  = j*pneighbor;
   for(size_t nn = 0; nn < pneighbor; nn++)
    {
-     FloatType printpcc = neighborVal[begin + nn];
+     FloatType printpcc  = neighborVal[begin + nn];
      size_t neighborid   = neighborIdx[begin + nn];
      size_t printcount   = totCounts[beginO + neighborid];
-     if(printpcc > 1.01 || printpcc < -1.01)
-	continue;
-     myfile << std::setprecision(6) << (startVec[xx]+j) << " " << (float)printpcc << " " << neighborid << " " << printcount << "\n";
+     if(isnan((float)printpcc)){
+       continue;
+     //if(printpcc > 1.01 || printpcc < -1.01 || isnan((float)printpcc)){
+     //	continue;
+ }
+     myfile << std::setprecision(6) << (startVec[xx]+j) << " " << printpcc << " " << neighborid << " " << printcount << "\n";
    }
 }
 

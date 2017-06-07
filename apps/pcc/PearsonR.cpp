@@ -1,16 +1,11 @@
 /*
  * PearsonR.cpp
  *
- *  Created on: Mar 17, 2016
- *      Author: Yongchao Liu
- *		  School of Computational Science & Engineering
- *		  Georgia Institute of Technology, USA
- *		  URL: www.liuyc.org
  */
 
 #include <PearsonR.hpp>
 #include <EXPMatrixReader.hpp>
-#include "LightPCC.h"
+#include "PCC.h"
 
 /*execution mode*/
 #define SINGLE_THREADED		0

@@ -1,5 +1,5 @@
-#sources = LightPCC.cpp PearsonRMKL.cpp PearsonR.cpp SpearmanR.cpp KendallTau.cpp Distance.cpp MIAdaptive.cpp Utilities.cpp
-sources = LightPCC.cpp PearsonRMKL.cpp Utilities.cpp
+#sources = PCC.cpp PearsonRMKL.cpp PearsonR.cpp SpearmanR.cpp KendallTau.cpp Distance.cpp MIAdaptive.cpp Utilities.cpp
+sources = PCC.cpp PearsonRMKL.cpp Utilities.cpp
 
 src_dir = .
 objs_dir = objs
@@ -41,6 +41,7 @@ IPP_INC= -I $(IPP_ROOT)/include
 #compiler and options for non-MPI-based version
 CXX = icpc
 CXXFLAGS= -std=c++11 -DHAVE_INTEL_ICC -O3 $(FAST) $(MKL_INC) $(IPP_INC) -ipp -mkl -funroll-loops -Wall -I include $(macros) -qopenmp $(VEC_REPORT) $(LIB_HEADER_INC)
+#CXXFLAGS= -std=c++11 -DHAVE_INTEL_ICC $(FAST) $(MKL_INC) $(IPP_INC) -ipp -mkl -funroll-loops -Wall -I include $(macros) -qopenmp $(VEC_REPORT) $(LIB_HEADER_INC)
 LIBS = $(MKL_LIB) $(IPP_LIB) -lm -loffload	$(zlibs)
 
 #compiler and options for MPI-based version

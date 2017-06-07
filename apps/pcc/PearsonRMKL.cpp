@@ -1,16 +1,10 @@
 /*
  * PearsonRMKL.cpp
- *
- *  Created on: Mar 17, 2016
- *      Author: Yongchao Liu
- *		  School of Computational Science & Engineering
- *		  Georgia Institute of Technology, USA
- *		  URL: www.liuyc.org
  */
 
 #include <PearsonRMKL.hpp>
 #include <EXPMatrixReader.hpp>
-#include "LightPCC.h"
+#include "PCC.h"
 
 /*execution mode*/
 #define SINGLE_THREADED		0
@@ -20,16 +14,16 @@
 #endif
 
 #ifdef WITH_MPI
-#define CPU_MPI						3
+#define CPU_MPI			3
 #ifdef WITH_PHI
-#define XEON_PHI_MPI			4
+#define XEON_PHI_MPI		4
 #endif
 #endif
 
 static Options option;
 static void printUsage() {
 	fprintf(stderr,
-			"LightPCC pearson [options] -m exe_mode\n");
+			"PCC pearson [options] -m exe_mode\n");
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "\t-i <str> (input EXP formatted file [random data if not given]\n");
 	fprintf(stderr, "\t-d <int> (use double precision, default = %d)\n",
@@ -45,8 +39,13 @@ static void printUsage() {
 			"\t-p <int> (number of Xeon Phi threads, default = %d [0 means auto])\n",
 			option._numMICThreads);
 
-	fprintf(stderr, "\t-m <int> (execution mode, default = %d [-1 invaid])\n",
-			option._mode);
+	fprintf(stderr, "\t-N <size_t> (number of neighbors to return, default = %d [100])\n", option._numNeighbors);
+	fprintf(stderr, "\t-C <size_t> (minimum count to filter vector/vector comparison, default = %d [5])\n", option._minCount);
+	fprintf(stderr, "\t-S <float> (minimum pcc score, default = %d [-1 to 1])\n", option._minPCC);
+	fprintf(stderr, "\t-L <float> (maximum pcc score, default = %d [-1 to 1])\n", option._maxPCC);
+	fprintf(stderr, "\t-B <size_t> (atomic batch size i.e. 200 default = %d [200])\n", option._batchSize);
+        fprintf(stderr, "\t-m <int> (execution mode, default = %d [-1 invaid])\n",
+                        option._mode);
 #ifndef WITH_MPI	/*without mpi*/
 	fprintf(stderr, "\t    %d: singled-threaded on the CPU\n", SINGLE_THREADED);
 	fprintf(stderr, "\t    %d: multi-threaded on the CPU\n", MULTI_THREADED);
@@ -75,7 +74,7 @@ static bool parseArgs(int argc, char* argv[]) {
 		printUsage();
 		return false;
 	}
-	while ((opt = getopt(argc, argv, "i:d:n:l:t:p:m:hx:")) != -1) {
+	while ((opt = getopt(argc, argv, "i:d:n:l:t:p:m:N:C:S:L:B:hx:")) != -1) {
 		switch (opt) {
 		case 'i':
 			option._input = optarg;
@@ -101,6 +100,21 @@ static bool parseArgs(int argc, char* argv[]) {
 		case 'p':
 			option._numMICThreads = atoi(optarg);
 			break;
+                case 'N':
+                        option._numNeighbors = atoi(optarg);
+                        break;
+                case 'C':
+                        option._minCount = atoi(optarg);
+                        break;
+                case 'S':
+                        option._minPCC = atof(optarg);
+                        break;
+                case 'L':
+                        option._maxPCC = atof(optarg);
+                        break;
+                case 'B':
+                        option._batchSize = atoi(optarg);
+                        break;
 		case 'm':
 			option._mode = atoi(optarg);
 #ifdef WITH_PHI
@@ -139,12 +153,12 @@ static bool parseArgs(int argc, char* argv[]) {
 	if (option._input.length() == 0) {
 		if (option._numVectors == 0) {
 			fprintf(stderr,
-					"Must specifiy the number of vectors using paramter: -n\n");
+				"Must specifiy the number of vectors using paramter: -n\n");
 			return false;
 		}
 		if (option._vectorSize == 0) {
 			fprintf(stderr,
-					"Must specify the vector size using paramter: -l\n");
+				"Must specify the vector size using paramter: -l\n");
 			return false;
 		}
 	} else {
@@ -166,7 +180,7 @@ static bool parseArgs(int argc, char* argv[]) {
 	return true;
 }
 
-int lightPearsonRMKL(int argc, char* argv[]) {
+int PCCPearsonRMKL(int argc, char* argv[]) {
 
 	/*parse the arguments*/
 	if (!parseArgs(argc, argv)) {
@@ -197,6 +211,11 @@ int lightPearsonRMKL(int argc, char* argv[]) {
 		fprintf(stderr, "Vector size: %d\n", option._vectorSize);
 		fprintf(stderr, "Number of vectors: %d\n", option._numVectors);
 		fprintf(stderr, "Number of vector pairs: %ld\n", numPairs);
+		fprintf(stderr, "Number of neighbors: %d\n", option._numNeighbors);
+		fprintf(stderr, "Minimum count: %d\n", option._minCount);
+		fprintf(stderr, "Minimum pcc score: %f\n", option._minPCC);
+		fprintf(stderr, "Maximum pcc score: %f\n", option._maxPCC);
+		fprintf(stderr, "Batch size: %zu\n", option._batchSize);
 		fprintf(stderr, "Execution mode: %d\n", option._mode);
 #ifdef WITH_PHI_ASSEMBLY_FLOAT
 		fprintf(stderr, "Xeon Phi with assemblies for single precision\n");
@@ -209,7 +228,7 @@ int lightPearsonRMKL(int argc, char* argv[]) {
 	if (!option._useDouble) {
 		PearsonRMKL<float> pr(option._numVectors, option._vectorSize,
 				option._numCPUThreads, option._numMICThreads, option._micIndex,
-				option._rank, option._numProcs);
+				option._rank, option._numProcs, option._numNeighbors, option._minCount, option._minPCC, option._maxPCC, option._batchSize);
 
 		if (option._input.length()) {
 			EXPMatrixReader<float>::loadMatrixData(option._input, option._genes,
@@ -222,10 +241,10 @@ int lightPearsonRMKL(int argc, char* argv[]) {
 		/*run the kernel*/
 		switch (option._mode) {
 #ifndef WITH_MPI
-		case SINGLE_THREADED:
+		        case SINGLE_THREADED:
 			pr.runSingleThreaded();
 			break;
-		case MULTI_THREADED:
+		        case MULTI_THREADED:
 			pr.runMultiThreaded();
 			break;
 #ifdef WITH_PHI
@@ -251,7 +270,7 @@ int lightPearsonRMKL(int argc, char* argv[]) {
 	} else {
 		PearsonRMKL<double> pr(option._numVectors, option._vectorSize,
 				option._numCPUThreads, option._numMICThreads, option._micIndex,
-				option._rank, option._numProcs);
+option._rank, option._numProcs, option._numNeighbors, option._minCount, option._minPCC, option._maxPCC, option._batchSize);
 		if (option._input.length()) {
 			EXPMatrixReader<double>::loadMatrixData(option._input, option._genes,
 					option._samples, pr.getVectors(), pr.getNumVectors(),
