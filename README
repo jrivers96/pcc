@@ -1,6 +1,7 @@
-Prototype sparse correlation operator
+Prototype scalable math operations
+1. Pearson correlation implementing "pairwise.complete.obs"
 
-Referencing
+Reference mpi implementation at:
 http://lightpcc.sourceforge.net
 
 Install MPSS which seems to be required by the intel compiler suite
