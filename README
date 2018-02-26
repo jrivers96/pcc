@@ -1,3 +1,6 @@
+Prototype sparse correlation operator
+
+Referencing
 http://lightpcc.sourceforge.net
 
 Install MPSS which seems to be required by the intel compiler suite
